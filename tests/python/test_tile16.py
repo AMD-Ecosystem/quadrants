@@ -959,7 +959,7 @@ def test_tile16_vec_proxy_multi_column_accumulate(tensor_type):
 # =============================================================================
 
 
-@test_utils.test(arch=qd.gpu)
+@test_utils.test(arch=[qd.cuda, qd.amdgpu])
 def test_tile16_f64_roundtrip_into_f32_array():
     """Load f32 data through an f64 tile and store back — must be lossless."""
 
