@@ -121,40 +121,48 @@ def test_tile16_eye_inplace(tensor_type, qd_dtype):
 @test_utils.test(arch=qd.gpu)
 @pytest.mark.parametrize("tensor_type", [qd.ndarray, qd.field])
 @pytest.mark.parametrize("qd_dtype", _QD_DTYPES)
-@pytest.mark.parametrize("row_off", [0, 13, 76])
-@pytest.mark.parametrize("col_off", [0, 7, 76])
-@pytest.mark.parametrize("ncols", [_TILE, 5, 3])
-def test_tile16_load_store(tensor_type, qd_dtype, row_off, col_off, ncols):
-    """Load 16 rows x ncols columns from (row_off, col_off) in a large array into a tile,
-    store to a _TILE x _TILE destination, and verify contents + zero padding.
-
-    The tile always loads _TILE rows (one per thread); only the column count varies.
-    """
+@pytest.mark.parametrize("src_row", [0, 13, 76])
+@pytest.mark.parametrize("src_col", [0, 7, 76])
+@pytest.mark.parametrize("dst_row_dx", [-1, 0, 3])
+@pytest.mark.parametrize("dst_col_dx", [-1, 0, 3])
+@pytest.mark.parametrize("ncols", [_TILE, 5])
+def test_tile16_load_store(tensor_type, qd_dtype, src_row, src_col, dst_row_dx, dst_col_dx, ncols):
+    """Load _TILE rows x ncols columns from a large source array, store into a large
+    destination array at an independently parametrized position."""
     _skip_if_f64_unsupported(qd_dtype)
     arr_size = 92
+    dst_row = src_row + dst_row_dx
+    dst_col = src_col + dst_col_dx
+    if dst_row < 0 or dst_row + _TILE > arr_size:
+        pytest.skip("dst_row out of bounds")
+    if dst_col < 0 or dst_col + ncols > arr_size:
+        pytest.skip("dst_col out of bounds")
+
     np_dtype = _NP_DTYPES[qd_dtype]
     src = tensor_type(qd_dtype, (arr_size, arr_size))
-    dst = tensor_type(qd_dtype, (_TILE, _TILE))
+    dst = tensor_type(qd_dtype, (arr_size, arr_size))
 
-    Ann_src = _ann(tensor_type, qd_dtype, 2)
-    Ann_dst = _ann(tensor_type, qd_dtype, 2)
+    Ann = _ann(tensor_type, qd_dtype, 2)
 
     @qd.kernel
-    def k1(src_arr: Ann_src, dst_arr: Ann_dst):
+    def k1(src_arr: Ann, dst_arr: Ann):
         qd.loop_config(block_dim=_TILE)
         for _ in range(_TILE):
             t = qd.simt.Tile16x16.zeros(dtype=qd_dtype)
-            t[:] = src_arr[row_off : row_off + _TILE, col_off : col_off + ncols]
-            dst_arr[0:_TILE, 0:_TILE] = t
+            t[:] = src_arr[src_row : src_row + _TILE, src_col : src_col + ncols]
+            dst_arr[dst_row : dst_row + _TILE, dst_col : dst_col + ncols] = t
 
     data = (np.arange(arr_size * arr_size, dtype=np_dtype).reshape(arr_size, arr_size) + 1.0)
     src.from_numpy(data)
-    dst.from_numpy(np.full((_TILE, _TILE), -1.0, dtype=np_dtype))
+    sentinel = np.full((arr_size, arr_size), -1.0, dtype=np_dtype)
+    dst.from_numpy(sentinel)
     k1(src, dst)
     result = dst.to_numpy()
 
-    expected = np.zeros((_TILE, _TILE), dtype=np_dtype)
-    expected[:, :ncols] = data[row_off : row_off + _TILE, col_off : col_off + ncols]
+    expected = sentinel.copy()
+    expected[dst_row : dst_row + _TILE, dst_col : dst_col + ncols] = (
+        data[src_row : src_row + _TILE, src_col : src_col + ncols]
+    )
     np.testing.assert_allclose(result, expected)
 
 
