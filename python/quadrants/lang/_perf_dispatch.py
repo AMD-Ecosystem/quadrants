@@ -255,6 +255,8 @@ class PerformanceDispatcher(Generic[P, R]):
         if self._forced_impl is not None:
             return self._forced_impl(*args, **kwargs)
 
+        _diag = os.environ.get("QD_PERFDISPATCH_DIAG", "0") == "1"
+
         if self._cached_impl is not None:
             ca, ck = self._cached_args, self._cached_kwargs
             assert ca is not None and ck is not None
@@ -267,6 +269,7 @@ class PerformanceDispatcher(Generic[P, R]):
                 return self._cached_impl(*args, **kwargs)
 
         geometry_hash = self._get_geometry_hash(*args, **kwargs)
+        gh_id = id(geometry_hash) if not isinstance(geometry_hash, (int, float)) else geometry_hash
         fastest = self._fastest_dispatch_impl_by_geometry_hash.get(geometry_hash)
         if fastest:
             restart_measurements = False
@@ -281,6 +284,12 @@ class PerformanceDispatcher(Generic[P, R]):
                     restart_measurements = True
             if not restart_measurements:
                 return fastest(*args, **kwargs)
+
+            if _diag:
+                print(f"DIAG perf_dispatch '{self._name}': RESTART profiling for gh={gh_id:#x}, "
+                      f"prev_fastest='{fastest.get_implementation2().__name__}', "
+                      f"n_known_hashes={len(self._fastest_dispatch_impl_by_geometry_hash)}, "
+                      f"arch={impl.get_runtime()._arch}", flush=True)
 
             self._times_by_dispatch_impl_by_geometry_hash[geometry_hash].clear()
             self._trial_count_by_dispatch_impl_by_geometry_hash[geometry_hash].clear()
@@ -303,9 +312,20 @@ class PerformanceDispatcher(Generic[P, R]):
                 f"out of {len(self._dispatch_impls)} registered functions. Only 1 was compatible."
             )
             _logging.debug(log_str)
-            if QD_PERFDISPATCH_PRINT_DEBUG:
-                print(log_str)
+            if QD_PERFDISPATCH_PRINT_DEBUG or _diag:
+                print(f"DIAG {log_str} gh={gh_id:#x} arch={impl.get_runtime()._arch}", flush=True)
             return dispatch_impl_(*args, **kwargs)
+
+        if _diag:
+            if not hasattr(self, '_diag_first_profiling_done'):
+                self._diag_first_profiling_done = set()
+            if gh_id not in self._diag_first_profiling_done:
+                self._diag_first_profiling_done.add(gh_id)
+                compat_names = [d.get_implementation2().__name__ for d in compatible_set]
+                arg_ids = [f"{type(a).__name__}@{id(a):#x}" for a in args]
+                print(f"DIAG perf_dispatch '{self._name}': NEW profiling gh={gh_id:#x}, "
+                      f"compatible={compat_names}, n_known_hashes={len(self._fastest_dispatch_impl_by_geometry_hash)}, "
+                      f"arch={impl.get_runtime()._arch}, arg_ids={arg_ids}", flush=True)
 
         min_trial_count, dispatch_impl = self._get_next_dispatch_impl(
             compatible_set=compatible_set, geometry_hash=geometry_hash
@@ -323,9 +343,16 @@ class PerformanceDispatcher(Generic[P, R]):
             end = time.time()
             elapsed = end - start
             self._times_by_dispatch_impl_by_geometry_hash[geometry_hash][dispatch_impl].append(elapsed)
+            if _diag:
+                impl_name = dispatch_impl.get_implementation2().__name__
+                print(f"DIAG perf_dispatch '{self._name}': TIMED '{impl_name}' = {elapsed*1000:.3f}ms gh={gh_id:#x}", flush=True)
             if self._compute_are_trials_finished(geometry_hash=geometry_hash):
                 self._compute_and_update_fastest(geometry_hash)
                 self._last_check_time_by_geometry_hash[geometry_hash] = time.time()
+                if _diag:
+                    chosen = self._fastest_dispatch_impl_by_geometry_hash[geometry_hash]
+                    print(f"DIAG perf_dispatch '{self._name}': DECIDED '{chosen.get_implementation2().__name__}' "
+                          f"gh={gh_id:#x}", flush=True)
         return res
 
 
