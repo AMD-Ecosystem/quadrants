@@ -8,6 +8,7 @@ import scipy.linalg
 import quadrants as qd
 from quadrants.lang.simt.tile16 import outer
 
+from quadrants.lang.exception import QuadrantsSyntaxError
 from tests import test_utils
 
 _TILE = qd.simt.Tile16x16.SIZE
@@ -966,6 +967,21 @@ def test_tile16_f64_roundtrip_into_f32_array():
 # =============================================================================
 # Proxy API specific tests
 # =============================================================================
+
+
+@test_utils.test(arch=qd.cpu)
+def test_tile16_raises_on_cpu():
+    """Using Tile16x16 on a CPU backend must raise QuadrantsSyntaxError, not crash."""
+    @qd.kernel
+    def run(dst: qd.types.NDArray[qd.f32, 2]):
+        qd.loop_config(block_dim=_TILE)
+        for _ in range(_TILE):
+            t = qd.simt.Tile16x16.zeros(dtype=qd.f32)
+            dst[0:_TILE, 0:_TILE] = t
+
+    dst = qd.ndarray(qd.f32, (_TILE, _TILE))
+    with pytest.raises(QuadrantsSyntaxError, match="requires a GPU backend"):
+        run(dst)
 
 
 @test_utils.test(arch=qd.gpu)

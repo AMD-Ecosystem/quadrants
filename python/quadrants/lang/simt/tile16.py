@@ -965,9 +965,16 @@ class _Tile16x16Proxy:
 
     @staticmethod
     def _resolve(dtype):
-        if dtype is None:
-            from quadrants.lang import impl  # pylint: disable=import-outside-toplevel
+        from quadrants.lang import impl  # pylint: disable=import-outside-toplevel
+        from quadrants.lang.exception import QuadrantsSyntaxError  # pylint: disable=import-outside-toplevel
 
+        arch = impl.current_cfg().arch
+        if arch in (qd.cpu, qd.x64, getattr(qd, "arm64", None)):
+            raise QuadrantsSyntaxError(
+                "Tile16x16 requires a GPU backend (cuda, metal, vulkan, amdgpu). "
+                f"Current arch is {arch}."
+            )
+        if dtype is None:
             dtype = impl.get_runtime().default_fp
         return _make_tile16x16(dtype)
 
