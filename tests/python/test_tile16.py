@@ -118,14 +118,11 @@ def test_tile16_eye_inplace(tensor_type, qd_dtype):
     np.testing.assert_allclose(dst.to_numpy(), np.eye(_TILE, dtype=np_dtype))
 
 
-_ARR = 92
-
-
 @test_utils.test(arch=qd.gpu)
 @pytest.mark.parametrize("tensor_type", [qd.ndarray, qd.field])
 @pytest.mark.parametrize("qd_dtype", _QD_DTYPES)
-@pytest.mark.parametrize("row_off", [0, 13, _ARR - _TILE])
-@pytest.mark.parametrize("col_off", [0, 7, _ARR - _TILE])
+@pytest.mark.parametrize("row_off", [0, 13, 76])
+@pytest.mark.parametrize("col_off", [0, 7, 76])
 @pytest.mark.parametrize("ncols", [_TILE, 5, 3])
 def test_tile16_load_store(tensor_type, qd_dtype, row_off, col_off, ncols):
     """Load 16 rows x ncols columns from (row_off, col_off) in a large array into a tile,
@@ -134,8 +131,9 @@ def test_tile16_load_store(tensor_type, qd_dtype, row_off, col_off, ncols):
     The tile always loads _TILE rows (one per thread); only the column count varies.
     """
     _skip_if_f64_unsupported(qd_dtype)
+    arr_size = 92
     np_dtype = _NP_DTYPES[qd_dtype]
-    src = tensor_type(qd_dtype, (_ARR, _ARR))
+    src = tensor_type(qd_dtype, (arr_size, arr_size))
     dst = tensor_type(qd_dtype, (_TILE, _TILE))
 
     Ann_src = _ann(tensor_type, qd_dtype, 2)
@@ -149,7 +147,7 @@ def test_tile16_load_store(tensor_type, qd_dtype, row_off, col_off, ncols):
             t[:] = src_arr[row_off : row_off + _TILE, col_off : col_off + ncols]
             dst_arr[0:_TILE, 0:_TILE] = t
 
-    data = (np.arange(_ARR * _ARR, dtype=np_dtype).reshape(_ARR, _ARR) + 1.0)
+    data = (np.arange(arr_size * arr_size, dtype=np_dtype).reshape(arr_size, arr_size) + 1.0)
     src.from_numpy(data)
     dst.from_numpy(np.full((_TILE, _TILE), -1.0, dtype=np_dtype))
     k1(src, dst)
