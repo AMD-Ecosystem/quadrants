@@ -983,6 +983,113 @@ def test_tile16_f64_roundtrip_into_f32_array():
 
 
 # =============================================================================
+# Error handling tests — verify bad slices raise QuadrantsSyntaxError
+# =============================================================================
+
+
+@test_utils.test(arch=qd.gpu)
+def test_tile16_load_negative_row_raises():
+    """Negative row offset in tile load must raise QuadrantsSyntaxError."""
+    src = qd.ndarray(qd.f32, (_TILE, _TILE))
+
+    @qd.kernel
+    def k1(s: qd.types.NDArray[qd.f32, 2]):
+        qd.loop_config(block_dim=_TILE)
+        for _ in range(_TILE):
+            t = qd.simt.Tile16x16.zeros(dtype=qd.f32)
+            t[:] = s[-1 : _TILE, 0:_TILE]
+
+    with pytest.raises(QuadrantsSyntaxError, match="Negative indices"):
+        k1(src)
+
+
+@test_utils.test(arch=qd.gpu)
+def test_tile16_load_negative_col_raises():
+    """Negative col offset in tile load must raise QuadrantsSyntaxError."""
+    src = qd.ndarray(qd.f32, (_TILE, _TILE))
+
+    @qd.kernel
+    def k1(s: qd.types.NDArray[qd.f32, 2]):
+        qd.loop_config(block_dim=_TILE)
+        for _ in range(_TILE):
+            t = qd.simt.Tile16x16.zeros(dtype=qd.f32)
+            t[:] = s[0:_TILE, -1 : _TILE]
+
+    with pytest.raises(QuadrantsSyntaxError, match="Negative indices"):
+        k1(src)
+
+
+@test_utils.test(arch=qd.gpu)
+def test_tile16_load_missing_start_raises():
+    """Omitting slice start in tile load must raise QuadrantsSyntaxError."""
+    src = qd.ndarray(qd.f32, (_TILE, _TILE))
+
+    @qd.kernel
+    def k1(s: qd.types.NDArray[qd.f32, 2]):
+        qd.loop_config(block_dim=_TILE)
+        for _ in range(_TILE):
+            t = qd.simt.Tile16x16.zeros(dtype=qd.f32)
+            t[:] = s[:_TILE, 0:_TILE]
+
+    with pytest.raises(QuadrantsSyntaxError, match="start index is required"):
+        k1(src)
+
+
+@test_utils.test(arch=qd.gpu)
+def test_tile16_store_negative_row_raises():
+    """Negative row offset in tile store must raise QuadrantsSyntaxError."""
+    src = qd.ndarray(qd.f32, (_TILE, _TILE))
+    dst = qd.ndarray(qd.f32, (_TILE, _TILE))
+
+    @qd.kernel
+    def k1(s: qd.types.NDArray[qd.f32, 2], d: qd.types.NDArray[qd.f32, 2]):
+        qd.loop_config(block_dim=_TILE)
+        for _ in range(_TILE):
+            t = qd.simt.Tile16x16.zeros(dtype=qd.f32)
+            t[:] = s[0:_TILE, 0:_TILE]
+            d[-1 : _TILE, 0:_TILE] = t
+
+    with pytest.raises(QuadrantsSyntaxError, match="Negative indices"):
+        k1(src, dst)
+
+
+@test_utils.test(arch=qd.gpu)
+def test_tile16_store_negative_col_raises():
+    """Negative col offset in tile store must raise QuadrantsSyntaxError."""
+    src = qd.ndarray(qd.f32, (_TILE, _TILE))
+    dst = qd.ndarray(qd.f32, (_TILE, _TILE))
+
+    @qd.kernel
+    def k1(s: qd.types.NDArray[qd.f32, 2], d: qd.types.NDArray[qd.f32, 2]):
+        qd.loop_config(block_dim=_TILE)
+        for _ in range(_TILE):
+            t = qd.simt.Tile16x16.zeros(dtype=qd.f32)
+            t[:] = s[0:_TILE, 0:_TILE]
+            d[0:_TILE, -1 : _TILE] = t
+
+    with pytest.raises(QuadrantsSyntaxError, match="Negative indices"):
+        k1(src, dst)
+
+
+@test_utils.test(arch=qd.gpu)
+def test_tile16_store_missing_start_raises():
+    """Omitting slice start in tile store must raise QuadrantsSyntaxError."""
+    src = qd.ndarray(qd.f32, (_TILE, _TILE))
+    dst = qd.ndarray(qd.f32, (_TILE, _TILE))
+
+    @qd.kernel
+    def k1(s: qd.types.NDArray[qd.f32, 2], d: qd.types.NDArray[qd.f32, 2]):
+        qd.loop_config(block_dim=_TILE)
+        for _ in range(_TILE):
+            t = qd.simt.Tile16x16.zeros(dtype=qd.f32)
+            t[:] = s[0:_TILE, 0:_TILE]
+            d[:_TILE, 0:_TILE] = t
+
+    with pytest.raises(QuadrantsSyntaxError, match="start index is required"):
+        k1(src, dst)
+
+
+# =============================================================================
 # Proxy API specific tests
 # =============================================================================
 
