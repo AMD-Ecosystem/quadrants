@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import pytest
 import scipy.linalg
@@ -945,3 +947,193 @@ def test_tile16_vec_proxy_multi_column_accumulate(tensor_type):
         col = V[K0:K0 + 16, c]
         expected -= np.outer(col, col)
     np.testing.assert_allclose(out.to_numpy(), expected, atol=1e-4)
+
+
+# =============================================================================
+# Dtype mismatch regression tests — f64 tile on f32 arrays
+#
+# Reproduces the g1_fall 50% FPS regression: when Genesis's solver.py captures
+# Tile16x16 = make_tile16x16(qd.f64) at import time (because a CPU test with
+# precision=64 imported it first), all subsequent GPU kernels use f64 tile
+# registers on f32 data — doubling register pressure and halving throughput.
+# =============================================================================
+
+
+@test_utils.test(arch=qd.gpu)
+def test_tile16_f64_roundtrip_into_f32_array():
+    """Load f32 data through an f64 tile and store back — must be lossless."""
+
+    Tile_f64 = make_tile16x16(qd.f64)
+    Tile_f32 = make_tile16x16(qd.f32)
+
+    src = qd.ndarray(shape=(N, N), dtype=qd.f32)
+    dst_f32 = qd.ndarray(shape=(N, N), dtype=qd.f32)
+    dst_f64 = qd.ndarray(shape=(N, N), dtype=qd.f32)
+
+    Ann = qd.types.NDArray[qd.f32, 2]
+
+    @qd.kernel
+    def roundtrip_f32(s: Ann, d: Ann):
+        qd.loop_config(block_dim=N)
+        for _ in range(N):
+            t = Tile_f32()
+            t[:] = s[0:N, 0:N]
+            d[0:N, 0:N] = t
+
+    @qd.kernel
+    def roundtrip_f64(s: Ann, d: Ann):
+        qd.loop_config(block_dim=N)
+        for _ in range(N):
+            t = Tile_f64()
+            t[:] = s[0:N, 0:N]
+            d[0:N, 0:N] = t
+
+    data = np.arange(N * N, dtype=np.float32).reshape(N, N) + 1.0
+    src.from_numpy(data)
+
+    roundtrip_f32(src, dst_f32)
+    roundtrip_f64(src, dst_f64)
+
+    np.testing.assert_array_equal(dst_f32.to_numpy(), data)
+    np.testing.assert_array_equal(dst_f64.to_numpy(), data)
+
+_ENVS = 4096
+_NDOFS = 48
+_N_BLOCKS = (_NDOFS + N - 1) // N
+
+
+def _make_cholesky_kernel(tile_cls):
+    """Build a tiled Cholesky kernel using the given Tile16x16 class."""
+
+    @qd.kernel
+    def cholesky_tiled(H: qd.types.NDArray[qd.f32, 3], eps_arr: qd.types.NDArray[qd.f32, 1]):
+        n_dofs = H.shape[1]
+        _B = H.shape[0]
+        EPS = eps_arr[0]
+
+        qd.loop_config(block_dim=tile_cls.SIZE)
+        for i in range(_B * tile_cls.SIZE):
+            tid = i % tile_cls.SIZE
+            i_b = i // tile_cls.SIZE
+            if i_b >= _B:
+                continue
+
+            for kb in range(_N_BLOCKS):
+                k0 = kb * tile_cls.SIZE
+
+                L_kk = tile_cls()
+                if k0 + tid < n_dofs:
+                    L_kk[:] = H[i_b, k0 : k0 + tile_cls.SIZE, k0:n_dofs]
+                else:
+                    L_kk.eye_()
+
+                for jb in range(kb):
+                    j0 = jb * tile_cls.SIZE
+                    for t in range(tile_cls.SIZE):
+                        v = H[i_b, k0:n_dofs, j0 + t]
+                        L_kk -= outer(v, v)
+
+                L_kk.cholesky_(EPS)
+
+                for ib in range(kb + 1, _N_BLOCKS):
+                    i0 = ib * tile_cls.SIZE
+
+                    L_ik = tile_cls()
+                    if i0 + tid < n_dofs:
+                        L_ik[:] = H[i_b, i0 : i0 + tile_cls.SIZE, k0:n_dofs]
+
+                    for jb in range(kb):
+                        j0 = jb * tile_cls.SIZE
+                        for t in range(tile_cls.SIZE):
+                            v_own = H[i_b, i0:n_dofs, j0 + t]
+                            v_diag = H[i_b, k0:n_dofs, j0 + t]
+                            L_ik -= outer(v_own, v_diag)
+
+                    L_kk.solve_triangular_(L_ik)
+
+                    if i0 + tid < n_dofs:
+                        H[i_b, i0 : i0 + tile_cls.SIZE, k0:n_dofs] = L_ik
+
+                if k0 + tid < n_dofs:
+                    H[i_b, k0 : k0 + tile_cls.SIZE, k0:n_dofs] = L_kk
+
+    return cholesky_tiled
+
+
+@test_utils.test(arch=qd.cuda)
+def test_tile16_f64_on_f32_arrays_perf_regression():
+    """f64 Tile16x16 on f32 arrays must not be silently slower than f32 tile.
+
+    This reproduces the g1_fall regression where solver.py captured
+    Tile16x16 = make_tile16x16(qd.f64) at module import time because
+    a CPU test with precision=64 imported it first.  The f64 tile uses
+    double-width registers for all Cholesky/trsm math, causing ~2x
+    slowdown on f32 data.
+    """
+    Tile_f32 = make_tile16x16(qd.f32)
+    Tile_f64 = make_tile16x16(qd.f64)
+
+    kernel_f32 = _make_cholesky_kernel(Tile_f32)
+    kernel_f64 = _make_cholesky_kernel(Tile_f64)
+
+    rng = np.random.RandomState(42)
+    B_np = rng.randn(_ENVS, _NDOFS, _NDOFS).astype(np.float32)
+    H_np = np.einsum("bij,bkj->bik", B_np, B_np) + _NDOFS * np.eye(_NDOFS, dtype=np.float32)
+
+    H_f32 = qd.ndarray(qd.f32, (_ENVS, _NDOFS, _NDOFS))
+    H_f64_on_f32 = qd.ndarray(qd.f32, (_ENVS, _NDOFS, _NDOFS))
+    eps_arr = qd.ndarray(qd.f32, (1,))
+    eps_arr.from_numpy(np.array([1e-6], dtype=np.float32))
+
+    # Warmup + correctness
+    H_f32.from_numpy(H_np.copy())
+    kernel_f32(H_f32, eps_arr)
+    result_f32 = H_f32.to_numpy()
+
+    H_f64_on_f32.from_numpy(H_np.copy())
+    kernel_f64(H_f64_on_f32, eps_arr)
+    result_f64 = H_f64_on_f32.to_numpy()
+
+    # Both must produce the same Cholesky factor (lower triangle)
+    for b in [0, 1, _ENVS - 1]:
+        L32 = np.tril(result_f32[b])
+        L64 = np.tril(result_f64[b])
+        np.testing.assert_allclose(L32, L64, atol=1e-3,
+                                   err_msg=f"Cholesky mismatch at batch {b}")
+
+    # Benchmark
+    REPS = 20
+    qd.sync()
+    H_f32.from_numpy(H_np.copy())
+    kernel_f32(H_f32, eps_arr)  # compile warmup
+    qd.sync()
+
+    t0 = time.perf_counter()
+    for _ in range(REPS):
+        H_f32.from_numpy(H_np.copy())
+        kernel_f32(H_f32, eps_arr)
+    qd.sync()
+    ms_f32 = (time.perf_counter() - t0) / REPS * 1000
+
+    H_f64_on_f32.from_numpy(H_np.copy())
+    kernel_f64(H_f64_on_f32, eps_arr)  # compile warmup
+    qd.sync()
+
+    t0 = time.perf_counter()
+    for _ in range(REPS):
+        H_f64_on_f32.from_numpy(H_np.copy())
+        kernel_f64(H_f64_on_f32, eps_arr)
+    qd.sync()
+    ms_f64 = (time.perf_counter() - t0) / REPS * 1000
+
+    ratio = ms_f64 / ms_f32
+    print(f"\n[tile16 dtype mismatch regression test]")
+    print(f"  f32 tile on f32 data: {ms_f32:.2f} ms/call")
+    print(f"  f64 tile on f32 data: {ms_f64:.2f} ms/call")
+    print(f"  ratio: {ratio:.2f}x")
+
+    assert ratio > 1.3, (
+        f"Expected f64 tile on f32 arrays to be >1.3x slower than f32 tile, "
+        f"got {ratio:.2f}x. If f64 is as fast as f32, the dtype mismatch "
+        f"regression may no longer apply on this hardware."
+    )
