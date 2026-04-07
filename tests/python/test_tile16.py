@@ -29,6 +29,7 @@ def _skip_if_f64_unsupported(dtype):
 
 
 def _make_spd(seed: int = 42, dtype: type = np.float32):
+    """Return a well-conditioned _TILE x _TILE symmetric positive-definite matrix."""
     rng = np.random.RandomState(seed)
     B = rng.randn(_TILE, _TILE).astype(np.float64)
     return (B @ B.T + _TILE * np.eye(_TILE)).astype(dtype)
