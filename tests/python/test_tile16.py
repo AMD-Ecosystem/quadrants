@@ -14,7 +14,7 @@ _TILE = qd.simt.Tile16x16.SIZE
 
 _QD_DTYPES = [qd.f32, qd.f64]
 _NP_DTYPES = {qd.f32: np.float32, qd.f64: np.float64}
-_ATOLS = {qd.f32: 1e-4, qd.f64: 1e-10}
+_ATOLS = {qd.f32: 1e-5, qd.f64: 1e-10}
 _EPS_VALS = {qd.f32: 1e-6, qd.f64: 1e-14}
 
 
