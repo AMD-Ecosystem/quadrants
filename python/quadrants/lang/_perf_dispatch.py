@@ -255,7 +255,8 @@ class PerformanceDispatcher(Generic[P, R]):
         if self._forced_impl is not None:
             return self._forced_impl(*args, **kwargs)
 
-        _diag = os.environ.get("QD_PERFDISPATCH_DIAG", "0") == "1"
+        _diag_path = os.environ.get("QD_PERFDISPATCH_DIAG")
+        _diag = bool(_diag_path)
 
         if self._cached_impl is not None:
             ca, ck = self._cached_args, self._cached_kwargs
@@ -345,7 +346,16 @@ class PerformanceDispatcher(Generic[P, R]):
             self._times_by_dispatch_impl_by_geometry_hash[geometry_hash][dispatch_impl].append(elapsed)
             if _diag:
                 impl_name = dispatch_impl.get_implementation2().__name__
-                print(f"DIAG perf_dispatch '{self._name}': TIMED '{impl_name}' = {elapsed*1000:.3f}ms gh={gh_id:#x}", flush=True)
+                graph_info = ""
+                try:
+                    prog = runtime.prog
+                    graph_info = (f" graph_used={prog.get_graph_cache_used_on_last_call()}"
+                                  f" graph_nodes={prog.get_graph_num_nodes_on_last_call()}"
+                                  f" graph_builds={prog.get_graph_total_builds()}"
+                                  f" graph_cache={prog.get_graph_cache_size()}")
+                except Exception:
+                    pass
+                print(f"DIAG perf_dispatch '{self._name}': TIMED '{impl_name}' = {elapsed*1000:.3f}ms gh={gh_id:#x}{graph_info}", flush=True)
             if self._compute_are_trials_finished(geometry_hash=geometry_hash):
                 self._compute_and_update_fastest(geometry_hash)
                 self._last_check_time_by_geometry_hash[geometry_hash] = time.time()
