@@ -55,6 +55,7 @@ def test_tile16_zeros(tensor_type, qd_dtype):
     _skip_if_f64_unsupported(qd_dtype)
     np_dtype = _NP_DTYPES[qd_dtype]
     dst = tensor_type(qd_dtype, (_TILE, _TILE))
+    dst.from_numpy(np.ones((_TILE, _TILE), dtype=np_dtype))
 
     Ann = _ann(tensor_type, qd_dtype, 2)
 
