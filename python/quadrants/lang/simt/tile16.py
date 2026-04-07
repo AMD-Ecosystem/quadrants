@@ -986,9 +986,6 @@ class _Tile16x16Proxy:
         """Identity tile (diagonal = 1, rest = 0)."""
         return self._resolve(dtype).eye()
 
-    def __call__(self, *args, dtype=None):
-        """Create a tile. With no args: zero-initialized. With 16 args: per-register values."""
-        return self._resolve(dtype)(*args)
 
 
 Tile16x16Proxy = _Tile16x16Proxy()
