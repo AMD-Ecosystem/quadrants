@@ -15,7 +15,7 @@ Usage example (inside a @qd.kernel or @qd.func)::
 
     t = qd.simt.Tile16x16.zeros(dtype=qd.f32)  # zero-initialized tile (explicit dtype)
     t = qd.simt.Tile16x16.eye(dtype=qd.f32)    # identity tile
-    t = qd.simt.Tile16x16()                     # zero tile using default_fp
+    t = qd.simt.Tile16x16.zeros()              # zero tile using default_fp
     t[:] = arr[r0:r0+16, c0:c0+n]               # load from 2D array (slice syntax)
     t[:] = arr[i0, r0:r0+16, c0:c0+n]           # load from 3D array (slice syntax)
     t.eye_()                                     # set to identity matrix (in-place)

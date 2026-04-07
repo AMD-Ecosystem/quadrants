@@ -206,7 +206,7 @@ def cholesky_tile16():
             k0 = kb * TILE
             k1 = qd.min(k0 + TILE, N)
 
-            L_kk = qd.simt.Tile16x16(dtype=qd.f32)
+            L_kk = qd.simt.Tile16x16.zeros(dtype=qd.f32)
             if k0 + tid < N:
                 L_kk[:] = A_field[env, k0:k1, k0:k1]
             else:
@@ -224,7 +224,7 @@ def cholesky_tile16():
                 i0 = ib * TILE
                 i1 = qd.min(i0 + TILE, N)
 
-                L_ik = qd.simt.Tile16x16(dtype=qd.f32)
+                L_ik = qd.simt.Tile16x16.zeros(dtype=qd.f32)
                 if i0 + tid < N:
                     L_ik[:] = A_field[env, i0:i1, k0:k1]
 

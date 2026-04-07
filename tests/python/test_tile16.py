@@ -300,25 +300,8 @@ def test_tile16_syr_sub(tensor_type, qd_dtype):
     def k1(mat_arr: Ann2, vec_arr: Ann1, out_arr: Ann2):
         qd.loop_config(block_dim=_TILE)
         for tid in range(_TILE):
-            t = qd.simt.Tile16x16(
-                mat_arr[tid, 0],
-                mat_arr[tid, 1],
-                mat_arr[tid, 2],
-                mat_arr[tid, 3],
-                mat_arr[tid, 4],
-                mat_arr[tid, 5],
-                mat_arr[tid, 6],
-                mat_arr[tid, 7],
-                mat_arr[tid, 8],
-                mat_arr[tid, 9],
-                mat_arr[tid, 10],
-                mat_arr[tid, 11],
-                mat_arr[tid, 12],
-                mat_arr[tid, 13],
-                mat_arr[tid, 14],
-                mat_arr[tid, 15],
-                dtype=qd_dtype,
-            )
+            t = qd.simt.Tile16x16.zeros(dtype=qd_dtype)
+            t[:] = mat_arr[0:_TILE, 0:_TILE]
             t -= outer(vec_arr[tid], vec_arr[tid])
             out_arr[0:_TILE, 0:_TILE] = t
 
@@ -354,25 +337,8 @@ def test_tile16_ger_sub(tensor_type, qd_dtype):
     ):
         qd.loop_config(block_dim=_TILE)
         for tid in range(_TILE):
-            t = qd.simt.Tile16x16(
-                mat_arr[tid, 0],
-                mat_arr[tid, 1],
-                mat_arr[tid, 2],
-                mat_arr[tid, 3],
-                mat_arr[tid, 4],
-                mat_arr[tid, 5],
-                mat_arr[tid, 6],
-                mat_arr[tid, 7],
-                mat_arr[tid, 8],
-                mat_arr[tid, 9],
-                mat_arr[tid, 10],
-                mat_arr[tid, 11],
-                mat_arr[tid, 12],
-                mat_arr[tid, 13],
-                mat_arr[tid, 14],
-                mat_arr[tid, 15],
-                dtype=qd_dtype,
-            )
+            t = qd.simt.Tile16x16.zeros(dtype=qd_dtype)
+            t[:] = mat_arr[0:_TILE, 0:_TILE]
             t -= outer(va_arr[tid], vb_arr[tid])
             out_arr[0:_TILE, 0:_TILE] = t
 
