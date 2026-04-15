@@ -261,7 +261,7 @@ struct AMDGPUConvertFuncParamAddressSpacePass : public ModulePass {
       auto new_func = llvm::Function::Create(new_func_type, f->getLinkage(),
                                              f->getAddressSpace());
       new_func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
-      new_func->addFnAttr("amdgpu-flat-work-group-size", "1, 1024");
+      new_func->copyAttributesFrom(f);
       new_func->addFnAttr(
           "target-cpu",
           "gfx" + AMDGPUContext::get_instance().get_mcpu().substr(3, 4));

@@ -173,7 +173,7 @@ class TaskCodeGenCPU : public TaskCodeGenLLVM {
     auto offloaded_task_name = init_offloaded_task_function(stmt);
     if (compile_config.kernel_profiler && arch_is_cpu(compile_config.arch)) {
       call("LLVMRuntime_profiler_start", get_runtime(),
-           builder->CreateGlobalStringPtr(offloaded_task_name));
+           builder->CreateGlobalString(offloaded_task_name));
     }
     if (stmt->task_type == Type::serial) {
       stmt->body->accept(this);
@@ -255,12 +255,8 @@ void KernelCodeGenCPU::optimize_module(llvm::Module *module) {
   llvm::TargetOptions options;
   if (compile_config.fast_math) {
     options.AllowFPOpFusion = llvm::FPOpFusion::Fast;
-    options.NoInfsFPMath = 1;
-    options.NoNaNsFPMath = 1;
   } else {
     options.AllowFPOpFusion = llvm::FPOpFusion::Strict;
-    options.NoInfsFPMath = 0;
-    options.NoNaNsFPMath = 0;
   }
   options.NoZerosInBSS = false;
   options.GuaranteedTailCallOpt = false;

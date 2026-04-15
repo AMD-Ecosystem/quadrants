@@ -56,19 +56,9 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   options.MCOptions.AsmVerbose = false;
   if (this->config_.fast_math) {
     options.AllowFPOpFusion = FPOpFusion::Fast;
-    // UnsafeFPMath was removed in LLVM 22; set the individual flags it implied
-    options.NoInfsFPMath = 1;
-    options.NoNaNsFPMath = 1;
-    options.NoSignedZerosFPMath = 1;
-    options.NoTrappingFPMath = 1;
   } else {
     options.AllowFPOpFusion = FPOpFusion::Strict;
-    options.NoInfsFPMath = 0;
-    options.NoNaNsFPMath = 0;
-    options.NoSignedZerosFPMath = 0;
-    options.NoTrappingFPMath = 0;
   }
-  options.HonorSignDependentRoundingFPMathOption = 0;
   options.NoZerosInBSS = 0;
   options.GuaranteedTailCallOpt = 0;
 
@@ -133,106 +123,96 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
     writer.write(gcn);
   }
 
-  // Replace the main optimization pipeline (lines 114-127)
-  llvm::legacy::FunctionPassManager function_pass_manager(llvm_module.get());
-  llvm::legacy::PassManager module_pass_manager;
-
-  // Use new PassBuilder API for optimizations
-  llvm::LoopAnalysisManager lam;
-  llvm::FunctionAnalysisManager fam;
-  llvm::CGSCCAnalysisManager cgam;
-  llvm::ModuleAnalysisManager mam;
-
-  llvm::PassBuilder pb(machine.get());
-  pb.registerModuleAnalyses(mam);
-  pb.registerCGSCCAnalyses(cgam);
-  pb.registerFunctionAnalyses(fam);
-  pb.registerLoopAnalyses(lam);
-  pb.crossRegisterProxies(lam, fam, cgam, mam);
-
-  llvm::ModulePassManager mpm =
-      pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
-
-  // Run the new optimization pipeline
-  mpm.run(*llvm_module, mam);
-
-  // Keep legacy PassManager for backend code generation
-  module_pass_manager.add(llvm::createTargetTransformInfoWrapperPass(
-      machine->getTargetIRAnalysis()));
-
-  machine->Options.MCOptions.AsmVerbose = true;
-
   auto tmp_dir = get_tmp_dir();
   uint64 random_num = get_random_num();
 
-  auto obj_filename = "quadrants_amdgcn_" + std::to_string(random_num) + ".o";
+  auto ll_filename = "quadrants_amdgcn_" + std::to_string(random_num) + ".ll";
   auto hsaco_filename =
       "quadrants_amdgcn_" + std::to_string(random_num) + ".hsaco";
-  auto obj_path = tmp_dir + obj_filename;
+  auto ll_path = tmp_dir + ll_filename;
   auto hsaco_path = tmp_dir + hsaco_filename;
-  std::error_code ec;
 
-  llvm::SmallString<0> outstr;
-  llvm::raw_svector_ostream llvm_stream(outstr);
+  // Write unoptimized LLVM IR to disk
+  {
+    std::error_code ec;
+    llvm::raw_fd_ostream ll_stream(ll_path, ec);
+    if (ec)
+      QD_ERROR("Failed to open {} for writing: {}", ll_path, ec.message());
+    llvm_module->print(ll_stream, nullptr);
+  }
 
-  machine->addPassesToEmitFile(module_pass_manager, llvm_stream, nullptr,
-                               llvm::CodeGenFileType::ObjectFile, true);
+  // Patch kernel attributes: remove amdgpu-no-agpr to allow AGPR spilling
+  // waves-per-eu and flat-work-group-size are set per-kernel in C++
+  {
+    std::string sed_cmd;
+    sed_cmd = "sed -i 's/\"amdgpu-no-agpr\" //g' " + ll_path;
+    std::system(sed_cmd.c_str());
+  }
 
-  function_pass_manager.doInitialization();
-  for (auto func = llvm_module->begin(); func != llvm_module->end(); ++func)
-    function_pass_manager.run(*func);
-  function_pass_manager.doFinalization();
-  module_pass_manager.run(*llvm_module);
-
-  std::string obj_str(outstr.begin(), outstr.end());
-  std::ofstream(obj_path) << obj_str;
-
-  QD_TRACE("Loading module...");
+  QD_TRACE("Compiling module via external clang...");
   [[maybe_unused]] auto _ = AMDGPUContext::get_instance().get_lock_guard();
 
-  // Try to find ld.lld from ROCm installation, fallback to system PATH
-  std::string lld_executable = "ld.lld";
+  // Use QD_CLANG env var, fall back to ROCM_PATH/llvm/bin/clang, then amdclang++
+  std::string clang_executable;
+  const char *qd_clang = std::getenv("QD_CLANG");
   const char *rocm_path = std::getenv("ROCM_PATH");
-  if (rocm_path) {
-    std::string rocm_lld = std::string(rocm_path) + "/llvm/bin/ld.lld";
-    std::ifstream test_lld(rocm_lld);
-    if (test_lld.good()) {
-      lld_executable = rocm_lld;
-    }
-  }
-  // Also try common ROCm installation paths
-  if (lld_executable == "ld.lld") {
-    std::vector<std::string> common_paths = {
-        "/opt/rocm/llvm/bin/ld.lld",
-        "/opt/rocm-7.0.0/llvm/bin/ld.lld",
-        "/opt/rocm-6.0.0/llvm/bin/ld.lld",
-    };
-    for (const auto &path : common_paths) {
-      std::ifstream test_lld(path);
-      if (test_lld.good()) {
-        lld_executable = path;
-        break;
-      }
-    }
+  if (qd_clang) {
+    clang_executable = qd_clang;
+  } else if (rocm_path) {
+    clang_executable = std::string(rocm_path) + "/llvm/bin/clang";
+  } else {
+    clang_executable = "clang";
   }
 
-  std::string lld_cmd =
-      lld_executable + " -shared " + obj_path + " -o " + hsaco_path;
-  QD_TRACE("Linking with command: {}", lld_cmd);
-  if (std::system(lld_cmd.c_str()))
+  auto mcpu = AMDGPUContext::get_instance().get_mcpu();
+  std::string fast_math_flags = this->config_.fast_math
+      ? "-ffast-math -ffp-contract=fast"
+      : "-ffp-contract=off";
+
+  std::string clang_cmd = clang_executable +
+      " -x ir"
+      " -target amdgcn-amd-amdhsa"
+      " -mcpu=" + mcpu +
+      " -O3"
+      " " + fast_math_flags +
+      " -nogpulib"
+      " -mllvm -amdgpu-spill-vgpr-to-agpr=1"
+      " -mllvm -unroll-threshold=100"
+      " -Xlinker --no-undefined"
+      " -o " + hsaco_path +
+      " " + ll_path;
+
+  QD_TRACE("Compiling with command: {}", clang_cmd);
+  if (std::system(clang_cmd.c_str()))
     QD_ERROR(
-        fmt::format("Generate {} Error. Make sure ld.lld is available in your "
-                    "ROCm installation, and add path to ROCm path to ROCM_PATH "
-                    "if necessary.",
-                    hsaco_filename));
+        fmt::format("Clang compilation failed for {}. Command: {}",
+                    hsaco_filename, clang_cmd));
 
   std::string hsaco_str = load_hsaco(hsaco_path);
 
   if (this->config_.print_kernel_llvm_ir_optimized) {
-    static FileSequenceWriter writer(
-        "quadrants_kernel_amdgpu_llvm_ir_optimized_{:04d}.ll",
-        "unoptimized LLVM IR (AMDGPU)");
-    writer.write(llvm_module.get());
+    // With external clang, dump the optimized IR via a separate opt call
+    auto opt_ll_path = tmp_dir + "quadrants_amdgcn_" +
+        std::to_string(random_num) + "_optimized.ll";
+    std::string opt_executable;
+    auto slash_pos = clang_executable.rfind('/');
+    if (slash_pos != std::string::npos) {
+      opt_executable = clang_executable.substr(0, slash_pos) + "/opt";
+    } else {
+      opt_executable = "opt";
+    }
+    std::string opt_cmd = opt_executable +
+        " -O3 -S -o " + opt_ll_path + " " + ll_path;
+    if (std::system(opt_cmd.c_str()) == 0) {
+      std::ifstream opt_ll_file(opt_ll_path);
+      std::string opt_ll_content(
+          (std::istreambuf_iterator<char>(opt_ll_file)),
+          std::istreambuf_iterator<char>());
+      static FileSequenceWriter writer(
+          "quadrants_kernel_amdgpu_llvm_ir_optimized_{:04d}.ll",
+          "optimized LLVM IR (AMDGPU)");
+      writer.write(opt_ll_content);
+    }
   }
 
   return hsaco_str;

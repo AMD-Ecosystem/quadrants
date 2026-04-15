@@ -586,6 +586,89 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
           "block_dim", llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0));
       patch_amdgpu_kernel_dim(
           "grid_dim", llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0));
+
+      // --- AMDGPU warp intrinsics for reductions ---
+
+      // warp_size() -> 64 for AMDGPU wave64
+      {
+        auto func = module->getFunction("warp_size");
+        if (func) {
+          func->deleteBody();
+          auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+          IRBuilder<> builder(*ctx);
+          builder.SetInsertPoint(bb);
+          builder.CreateRet(builder.getInt32(64));
+          QuadrantsLLVMContext::mark_inline(func);
+        }
+      }
+
+      // cuda_active_mask() -> 0xFFFFFFFF (treat all lanes as active)
+      {
+        auto func = module->getFunction("cuda_active_mask");
+        if (func) {
+          func->deleteBody();
+          auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+          IRBuilder<> builder(*ctx);
+          builder.SetInsertPoint(bb);
+          builder.CreateRet(builder.getInt32(-1));
+          QuadrantsLLVMContext::mark_inline(func);
+        }
+      }
+
+      // Helper lambda: patch cuda_shfl_down_sync for i32 using ds_bpermute.
+      // cuda_shfl_down_sync_i32(mask, val, delta, width) ->
+      //   ds_bpermute(((workitem_id_x + delta) & 63) << 2, val)
+      auto patch_shfl_down_i32 = [&](std::string name) {
+        auto func = module->getFunction(name);
+        if (!func)
+          return;
+        func->deleteBody();
+        auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+        IRBuilder<> builder(*ctx);
+        builder.SetInsertPoint(bb);
+        auto *val = func->getArg(1);   // i32 val
+        auto *delta = func->getArg(2); // i32 delta
+        auto *lane = builder.CreateIntrinsic(
+            Intrinsic::amdgcn_workitem_id_x, ArrayRef<llvm::Type *>{},
+            ArrayRef<llvm::Value *>{});
+        auto *src_lane = builder.CreateAdd(lane, delta);
+        auto *src_masked = builder.CreateAnd(src_lane, builder.getInt32(63));
+        auto *byte_idx = builder.CreateShl(src_masked, builder.getInt32(2));
+        auto *result = builder.CreateIntrinsic(
+            Intrinsic::amdgcn_ds_bpermute, ArrayRef<llvm::Type *>{},
+            ArrayRef<llvm::Value *>{byte_idx, val});
+        builder.CreateRet(result);
+        QuadrantsLLVMContext::mark_inline(func);
+      };
+      patch_shfl_down_i32("cuda_shfl_down_sync_i32");
+
+      // cuda_shfl_down_sync_f32: bitcast f32->i32, ds_bpermute, bitcast back
+      {
+        auto func = module->getFunction("cuda_shfl_down_sync_f32");
+        if (func) {
+          func->deleteBody();
+          auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+          IRBuilder<> builder(*ctx);
+          builder.SetInsertPoint(bb);
+          auto i32_ty = llvm::Type::getInt32Ty(*ctx);
+          auto f32_ty = llvm::Type::getFloatTy(*ctx);
+          auto *val = func->getArg(1);   // f32 val
+          auto *delta = func->getArg(2); // i32 delta
+          auto *lane = builder.CreateIntrinsic(
+              Intrinsic::amdgcn_workitem_id_x, ArrayRef<llvm::Type *>{},
+              ArrayRef<llvm::Value *>{});
+          auto *src_lane = builder.CreateAdd(lane, delta);
+          auto *src_masked = builder.CreateAnd(src_lane, builder.getInt32(63));
+          auto *byte_idx = builder.CreateShl(src_masked, builder.getInt32(2));
+          auto *val_i32 = builder.CreateBitCast(val, i32_ty);
+          auto *result_i32 = builder.CreateIntrinsic(
+              Intrinsic::amdgcn_ds_bpermute, ArrayRef<llvm::Type *>{},
+              ArrayRef<llvm::Value *>{byte_idx, val_i32});
+          builder.CreateRet(builder.CreateBitCast(result_i32, f32_ty));
+          QuadrantsLLVMContext::mark_inline(func);
+        }
+      }
+
 #endif
     }
   }
@@ -918,8 +1001,16 @@ void QuadrantsLLVMContext::mark_function_as_cuda_kernel(llvm::Function *func,
 }
 
 void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(
-    llvm::Function *func) {
+    llvm::Function *func, int block_dim) {
   func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+  func->addFnAttr("amdgpu-waves-per-eu", "1,8");
+  if (block_dim > 0) {
+    std::string wgs = std::to_string(block_dim) + "," +
+                      std::to_string(block_dim);
+    func->addFnAttr("amdgpu-flat-work-group-size", wgs);
+  } else {
+    func->addFnAttr("amdgpu-flat-work-group-size", "1,1024");
+  }
 }
 
 void QuadrantsLLVMContext::eliminate_unused_functions(

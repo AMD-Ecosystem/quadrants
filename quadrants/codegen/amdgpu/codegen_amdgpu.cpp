@@ -342,7 +342,13 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
   }
 
   void create_bls_buffer(OffloadedStmt *stmt) {
-    QD_NOT_IMPLEMENTED
+    auto type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*llvm_context),
+                                     stmt->bls_size);
+    bls_buffer = new GlobalVariable(
+        *module, type, false, llvm::GlobalValue::ExternalLinkage, nullptr,
+        "bls_buffer", nullptr, llvm::GlobalVariable::NotThreadLocal,
+        3 /*addrspace=shared (LDS)*/);
+    bls_buffer->setAlignment(llvm::MaybeAlign(8));
   }
 
   void visit(OffloadedStmt *stmt) override {
