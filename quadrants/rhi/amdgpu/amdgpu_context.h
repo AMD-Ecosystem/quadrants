@@ -95,6 +95,10 @@ class AMDGPUContext {
     return compute_capability_;
   }
 
+  bool supports_mem_pool() const {
+    return supports_mem_pool_;
+  }
+
   ~AMDGPUContext();
 
   class ContextGuard {
