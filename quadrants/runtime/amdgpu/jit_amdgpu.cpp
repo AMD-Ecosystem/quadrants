@@ -7,6 +7,9 @@
 
 #include <fstream>
 #include <cstdlib>
+#include <set>
+#include <sstream>
+#include <vector>
 
 namespace quadrants {
 namespace lang {
@@ -27,14 +30,15 @@ JITModule *JITSessionAMDGPU ::add_module(std::unique_ptr<llvm::Module> M,
 
 std::string JITSessionAMDGPU::compile_module_to_hsaco(
     std::unique_ptr<llvm::Module> &llvm_module) {
-  llvm::legacy::FunctionPassManager function_pass_manager_addrcast(
-      llvm_module.get());
-  function_pass_manager_addrcast.add(
-      new AMDGPUConvertAllocaInstAddressSpacePass());
-  function_pass_manager_addrcast.doInitialization();
-  for (auto func = llvm_module->begin(); func != llvm_module->end(); ++func)
-    function_pass_manager_addrcast.run(*func);
-  function_pass_manager_addrcast.doFinalization();
+  // Phase 1: Convert allocas to addrspace(5) with addrspacecast to flat
+  {
+    llvm::legacy::FunctionPassManager fpm(llvm_module.get());
+    fpm.add(new AMDGPUConvertAllocaInstAddressSpacePass());
+    fpm.doInitialization();
+    for (auto func = llvm_module->begin(); func != llvm_module->end(); ++func)
+      fpm.run(*func);
+    fpm.doFinalization();
+  }
 
   if (llvm::verifyModule(*llvm_module, &llvm::errs())) {
     llvm_module->print(llvm::errs(), nullptr);
@@ -169,7 +173,11 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
       ? "-ffast-math -ffp-contract=fast"
       : "-ffp-contract=off";
 
-  std::string clang_cmd = clang_executable +
+  auto asm_filename = "quadrants_amdgcn_" + std::to_string(random_num) + ".s";
+  auto asm_path = tmp_dir + asm_filename;
+
+  // Step 1: Compile LLVM IR to assembly via clang -O3
+  std::string compile_cmd = clang_executable +
       " -x ir"
       " -target amdgcn-amd-amdhsa"
       " -mcpu=" + mcpu +
@@ -178,15 +186,151 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
       " -nogpulib"
       " -mllvm -amdgpu-spill-vgpr-to-agpr=1"
       " -mllvm -unroll-threshold=100"
-      " -Xlinker --no-undefined"
-      " -o " + hsaco_path +
+      " -S"
+      " -o " + asm_path +
       " " + ll_path;
 
-  QD_TRACE("Compiling with command: {}", clang_cmd);
-  if (std::system(clang_cmd.c_str()))
+  QD_TRACE("Compiling to assembly: {}", compile_cmd);
+  if (std::system(compile_cmd.c_str()))
     QD_ERROR(
-        fmt::format("Clang compilation failed for {}. Command: {}",
-                    hsaco_filename, clang_cmd));
+        fmt::format("Clang compilation to assembly failed for {}. Command: {}",
+                    asm_filename, compile_cmd));
+
+  // Step 2: Per-function flat_load/flat_store -> global_load/global_store.
+  // A function is skipped if it:
+  //   - Uses LDS (ds_read/ds_write): flat accesses may target shared memory
+  //   - Has uses_flat_scratch=1: a private pointer escapes to generic address
+  //     space, so flat accesses may dereference private memory
+  {
+    std::ifstream asm_file(asm_path);
+    std::string asm_content((std::istreambuf_iterator<char>(asm_file)),
+                             std::istreambuf_iterator<char>());
+    asm_file.close();
+
+    std::vector<std::string> lines;
+    {
+      std::istringstream stream(asm_content);
+      std::string line;
+      while (std::getline(stream, line))
+        lines.push_back(line);
+    }
+
+    // Pass 1: Collect unsafe function names.
+    std::set<std::string> unsafe_funcs;
+
+    // Functions with uses_flat_scratch=1 (private pointer escape)
+    for (const auto& l : lines) {
+      if (l.find(".set") != std::string::npos &&
+          l.find(".uses_flat_scratch, 1") != std::string::npos) {
+        auto dot_l = l.find(".L");
+        if (dot_l != std::string::npos) {
+          auto ufs = l.find(".uses_flat_scratch", dot_l);
+          if (ufs != std::string::npos)
+            unsafe_funcs.insert(l.substr(dot_l + 2, ufs - dot_l - 2));
+        }
+      }
+    }
+
+    // Functions with LDS usage (ds_read/ds_write in their body)
+    {
+      std::string cur_func;
+      for (const auto& l : lines) {
+        if (!l.empty() && l[0] != '\t' && l[0] != ' ' && l[0] != '.' &&
+            l[0] != ';' && l[0] != '#') {
+          auto colon = l.find(':');
+          if (colon != std::string::npos)
+            cur_func = l.substr(0, colon);
+        }
+        if (!cur_func.empty() &&
+            (l.find("ds_read") != std::string::npos ||
+             l.find("ds_write") != std::string::npos)) {
+          unsafe_funcs.insert(cur_func);
+        }
+      }
+    }
+
+    for (const auto& name : unsafe_funcs)
+      QD_TRACE("  skip flat-to-global for: {} (LDS or flat scratch)", name);
+
+    // Pass 2: Convert flat_load/flat_store only within safe functions.
+    bool modified = false;
+    int converted_count = 0;
+    int skipped_count = 0;
+    std::string cur_func;
+    bool cur_safe = false;
+
+    for (auto& l : lines) {
+      // Detect function start: label at column 0
+      if (!l.empty() && l[0] != '\t' && l[0] != ' ' && l[0] != '.' &&
+          l[0] != ';' && l[0] != '#') {
+        auto colon = l.find(':');
+        if (colon != std::string::npos) {
+          cur_func = l.substr(0, colon);
+          cur_safe = unsafe_funcs.find(cur_func) == unsafe_funcs.end();
+        }
+      }
+
+      // Find flat_load_ or flat_store_ instruction
+      auto flat_pos = l.find("flat_load_");
+      if (flat_pos == std::string::npos)
+        flat_pos = l.find("flat_store_");
+
+      if (flat_pos == std::string::npos || flat_pos == 0 ||
+          (l[flat_pos - 1] != '\t' && l[flat_pos - 1] != ' '))
+        continue;
+
+      // Skip if inside a comment
+      auto comment_pos = l.find(';');
+      if (comment_pos != std::string::npos && comment_pos < flat_pos)
+        continue;
+
+      if (!cur_safe) {
+        skipped_count++;
+        continue;
+      }
+
+      // Replace "flat_" with "global_" (5 chars -> 7 chars)
+      l.replace(flat_pos, 5, "global_");
+
+      // Append ", off" before " offset:" or at end of line
+      auto offset_pos = l.find(" offset:");
+      if (offset_pos != std::string::npos) {
+        l.insert(offset_pos, ", off");
+      } else {
+        auto last = l.find_last_not_of(" \t\r\n");
+        if (last != std::string::npos) {
+          l.erase(last + 1);
+          l += ", off";
+        }
+      }
+      modified = true;
+      converted_count++;
+    }
+
+    QD_TRACE("flat-to-global: {} instructions converted, {} skipped (unsafe)",
+             converted_count, skipped_count);
+
+    if (modified) {
+      std::ofstream asm_out(asm_path);
+      for (const auto& l : lines)
+        asm_out << l << '\n';
+    }
+  }
+
+  // Step 3: Assemble patched assembly + link to HSACO
+  std::string assemble_cmd = clang_executable +
+      " -x assembler"
+      " -target amdgcn-amd-amdhsa"
+      " -mcpu=" + mcpu +
+      " -Xlinker --no-undefined"
+      " -o " + hsaco_path +
+      " " + asm_path;
+
+  QD_TRACE("Assembling to HSACO: {}", assemble_cmd);
+  if (std::system(assemble_cmd.c_str()))
+    QD_ERROR(
+        fmt::format("Assembly to HSACO failed for {}. Command: {}",
+                    hsaco_filename, assemble_cmd));
 
   std::string hsaco_str = load_hsaco(hsaco_path);
 
