@@ -6,26 +6,29 @@ namespace quadrants::lang {
 namespace amdgpu {
 
 void KernelLauncher::launch_offloaded_tasks(
-    LaunchContextBuilder &ctx,
     JITModule *amdgpu_module,
-    const std::vector<OffloadedTask> &offloaded_tasks) {
-  constexpr int kRuntimeContextArgSize = sizeof(RuntimeContext);
+    const std::vector<OffloadedTask> &offloaded_tasks,
+    void *context_pointer,
+    int arg_size) {
   for (const auto &task : offloaded_tasks) {
     QD_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
              task.block_dim);
     amdgpu_module->launch(task.name, task.grid_dim, task.block_dim,
                           task.dynamic_shared_array_bytes,
-                          {&ctx.get_context()}, {kRuntimeContextArgSize});
+                          {(void *)&context_pointer}, {arg_size});
   }
 }
 
 void KernelLauncher::launch_offloaded_tasks_with_do_while(
     LaunchContextBuilder &ctx,
     JITModule *amdgpu_module,
-    const std::vector<OffloadedTask> &offloaded_tasks) {
+    const std::vector<OffloadedTask> &offloaded_tasks,
+    void *context_pointer,
+    int arg_size) {
   int32_t counter_val;
   do {
-    launch_offloaded_tasks(ctx, amdgpu_module, offloaded_tasks);
+    launch_offloaded_tasks(amdgpu_module, offloaded_tasks, context_pointer,
+                           arg_size);
     counter_val = 0;
     AMDGPUDriver::get_instance().stream_synchronize(nullptr);
     AMDGPUDriver::get_instance().memcpy_device_to_host(
@@ -61,9 +64,9 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   std::unordered_map<ArgArrayPtrKey, void *, ArgArrayPtrKeyHasher> device_ptrs;
 
   char *device_result_buffer{nullptr};
-  AMDGPUDriver::get_instance().malloc_async(
+  AMDGPUDriver::get_instance().malloc(
       (void **)&device_result_buffer,
-      std::max(ctx.result_buffer_size, sizeof(uint64)), nullptr);
+      std::max(ctx.result_buffer_size, sizeof(uint64)));
 
   for (int i = 0; i < (int)parameters.size(); i++) {
     const auto &kv = parameters[i];
@@ -121,22 +124,33 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   }
   char *device_arg_buffer = nullptr;
   if (ctx.arg_buffer_size > 0) {
-    AMDGPUDriver::get_instance().malloc_async((void **)&device_arg_buffer,
-                                              ctx.arg_buffer_size, nullptr);
+    AMDGPUDriver::get_instance().malloc((void **)&device_arg_buffer,
+                                        ctx.arg_buffer_size);
     AMDGPUDriver::get_instance().memcpy_host_to_device(
         device_arg_buffer, ctx.get_context().arg_buffer, ctx.arg_buffer_size);
     ctx.get_context().arg_buffer = device_arg_buffer;
   }
 
+  void *context_pointer;
+  int arg_size = sizeof(RuntimeContext *);
+  AMDGPUDriver::get_instance().malloc((void **)&context_pointer,
+                                      sizeof(RuntimeContext));
+  AMDGPUDriver::get_instance().memcpy_host_to_device(
+      context_pointer, &ctx.get_context(), sizeof(RuntimeContext));
+
+  AMDGPUContext::get_instance().push_back_kernel_arg_pointer(context_pointer);
+
   if (ctx.graph_do_while_arg_id >= 0) {
     QD_ASSERT(ctx.graph_do_while_flag_dev_ptr);
-    launch_offloaded_tasks_with_do_while(ctx, amdgpu_module, offloaded_tasks);
+    launch_offloaded_tasks_with_do_while(ctx, amdgpu_module, offloaded_tasks,
+                                         context_pointer, arg_size);
   } else {
-    launch_offloaded_tasks(ctx, amdgpu_module, offloaded_tasks);
+    launch_offloaded_tasks(amdgpu_module, offloaded_tasks, context_pointer,
+                           arg_size);
   }
   QD_TRACE("Launching kernel");
   if (ctx.arg_buffer_size > 0) {
-    AMDGPUDriver::get_instance().mem_free_async(device_arg_buffer, nullptr);
+    AMDGPUDriver::get_instance().mem_free(device_arg_buffer);
   }
   if (ctx.result_buffer_size > 0) {
     AMDGPUDriver::get_instance().memcpy_device_to_host(
@@ -152,7 +166,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       executor->deallocate_memory_on_device(itr->second.second);
     }
   }
-  AMDGPUDriver::get_instance().mem_free_async(device_result_buffer, nullptr);
+  AMDGPUDriver::get_instance().mem_free(device_result_buffer);
 }
 
 KernelLauncher::Handle KernelLauncher::register_llvm_kernel(

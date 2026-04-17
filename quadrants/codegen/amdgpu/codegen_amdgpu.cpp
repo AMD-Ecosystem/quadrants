@@ -262,7 +262,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
   }
 
   bool kernel_argument_struct_in_kernarg() const override {
-    return true;
+    return false;
   }
 
   // SNode root pointers are hipMalloc'd global memory. Cast result
