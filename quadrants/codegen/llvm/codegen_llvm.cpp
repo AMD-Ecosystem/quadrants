@@ -22,6 +22,43 @@
 
 namespace quadrants::lang {
 
+void TaskCodeGenLLVM::init_tbaa_metadata() {
+  if (tbaa_ptr_access_)
+    return;
+  llvm::MDBuilder mdb(*llvm_context);
+  auto *tbaa_root = mdb.createTBAARoot("qd_tbaa");
+  auto *tbaa_ptr_type = mdb.createTBAAScalarTypeNode("qd_ptr", tbaa_root);
+  auto *tbaa_data_type = mdb.createTBAAScalarTypeNode("qd_data", tbaa_root);
+  tbaa_ptr_access_ =
+      mdb.createTBAAStructTagNode(tbaa_ptr_type, tbaa_ptr_type, 0);
+  tbaa_data_access_ =
+      mdb.createTBAAStructTagNode(tbaa_data_type, tbaa_data_type, 0);
+}
+
+void TaskCodeGenLLVM::attach_tbaa_ptr(llvm::Instruction *inst) {
+  if (!compile_config.noalias_snode)
+    return;
+  init_tbaa_metadata();
+  inst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_ptr_access_);
+}
+
+void TaskCodeGenLLVM::attach_tbaa_data(llvm::Instruction *inst) {
+  if (!compile_config.noalias_snode)
+    return;
+  init_tbaa_metadata();
+  inst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_data_access_);
+}
+
+int TaskCodeGenLLVM::get_snode_id_from_ptr(Stmt *ptr) {
+  if (auto *get_ch = ptr->cast<GetChStmt>())
+    return get_ch->output_snode->id;
+  if (auto *mat_ptr = ptr->cast<MatrixPtrStmt>())
+    return get_snode_id_from_ptr(mat_ptr->origin);
+  if (auto *gp = ptr->cast<GlobalPtrStmt>())
+    return gp->snode->id;
+  return -1;
+}
+
 // TODO: sort function definitions to match declaration order in header
 
 // TODO(k-ye): Hide FunctionCreationGuard inside cpp file
@@ -1598,7 +1635,9 @@ void TaskCodeGenLLVM::visit(GlobalStoreStmt *stmt) {
       QD_NOT_IMPLEMENTED;
     }
   } else {
-    builder->CreateStore(llvm_val[stmt->val], llvm_val[stmt->dest]);
+    auto *store = builder->CreateStore(llvm_val[stmt->val], llvm_val[stmt->dest]);
+    if (get_snode_id_from_ptr(stmt->dest) >= 0)
+      attach_tbaa_data(store);
   }
 }
 
@@ -1639,8 +1678,11 @@ void TaskCodeGenLLVM::create_global_load(GlobalLoadStmt *stmt,
       llvm_val[stmt] =
           create_intrinsic_load(ptr, tlctx->get_data_type(stmt->ret_type));
     } else {
-      llvm_val[stmt] =
+      auto *load =
           builder->CreateLoad(tlctx->get_data_type(stmt->ret_type), ptr);
+      if (get_snode_id_from_ptr(stmt->src) >= 0)
+        attach_tbaa_data(load);
+      llvm_val[stmt] = load;
     }
   }
 }

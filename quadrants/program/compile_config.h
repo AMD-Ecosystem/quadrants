@@ -74,6 +74,8 @@ struct CompileConfig {
   float64 device_memory_GB;
   float64 device_memory_fraction;
 
+  bool noalias_snode{false};
+
   bool quant_opt_store_fusion{true};
   bool quant_opt_atomic_demotion{true};
 

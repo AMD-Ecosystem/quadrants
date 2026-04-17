@@ -10,6 +10,7 @@
 #include "quadrants/codegen/llvm/llvm_codegen_utils.h"
 #include "quadrants/codegen/llvm/llvm_compiled_data.h"
 #include "quadrants/program/program.h"
+#include "llvm/IR/MDBuilder.h"
 
 namespace quadrants::lang {
 
@@ -68,6 +69,15 @@ class TaskCodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
   std::unordered_map<const Stmt *, std::vector<llvm::Value *>> loop_vars_llvm;
 
   std::unordered_map<Function *, llvm::Function *> func_map;
+
+  llvm::MDNode *tbaa_ptr_access_{nullptr};
+  llvm::MDNode *tbaa_data_access_{nullptr};
+
+  void init_tbaa_metadata();
+  void attach_tbaa_ptr(llvm::Instruction *inst);
+  void attach_tbaa_data(llvm::Instruction *inst);
+
+  static int get_snode_id_from_ptr(Stmt *ptr);
 
   using IRVisitor::visit;
   using LLVMModuleBuilder::call;

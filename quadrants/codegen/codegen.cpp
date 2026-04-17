@@ -5,6 +5,8 @@
 #if defined(QD_WITH_LLVM)
 #include "quadrants/codegen/cpu/codegen_cpu.h"
 #include "quadrants/runtime/program_impls/llvm/llvm_program.h"
+#include "llvm/IR/MDBuilder.h"
+#include "llvm/IR/Instructions.h"
 #endif
 #if defined(QD_WITH_CUDA)
 #include "quadrants/codegen/cuda/codegen_cuda.h"
@@ -86,6 +88,30 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module() {
   worker.flush();
 
   auto llvm_compiled_kernel = tlctx_.link_compiled_tasks(std::move(data));
+
+  if (compile_config_.noalias_snode) {
+    auto *mod = llvm_compiled_kernel.module.get();
+    auto &ctx = mod->getContext();
+    llvm::MDBuilder mdb(ctx);
+    auto *tbaa_root = mdb.createTBAARoot("qd_tbaa");
+    auto *tbaa_ptr_type =
+        mdb.createTBAAScalarTypeNode("qd_ptr", tbaa_root);
+    auto *tbaa_ptr_tag =
+        mdb.createTBAAStructTagNode(tbaa_ptr_type, tbaa_ptr_type, 0);
+    for (auto &F : *mod) {
+      auto name = F.getName();
+      if (name.contains("_get_") || name.contains("_lookup_element") ||
+          name.contains("_from_parent_element")) {
+        for (auto &BB : F) {
+          for (auto &I : BB) {
+            if (auto *LI = llvm::dyn_cast<llvm::LoadInst>(&I))
+              LI->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_ptr_tag);
+          }
+        }
+      }
+    }
+  }
+
   optimize_module(llvm_compiled_kernel.module.get());
   return llvm_compiled_kernel;
 }

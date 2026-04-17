@@ -185,6 +185,7 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
       " " + fast_math_flags +
       " -nogpulib"
       " -mllvm -amdgpu-spill-vgpr-to-agpr=1"
+      " -mllvm -amdgpu-use-aa-in-codegen=true"
       " -mllvm -unroll-threshold=100"
       " -S"
       " -o " + asm_path +

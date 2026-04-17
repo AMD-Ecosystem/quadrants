@@ -336,8 +336,11 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       }
     } else {
       // Byte pointer case.
-      llvm_val[stmt] =
+      auto *load =
           builder->CreateLoad(tlctx->get_data_type(stmt->ret_type), ptr);
+      if (get_snode_id_from_ptr(stmt->src) >= 0)
+        attach_tbaa_data(load);
+      llvm_val[stmt] = load;
     }
   }
 

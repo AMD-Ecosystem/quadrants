@@ -235,6 +235,7 @@ void export_lang(py::module &m) {
       .def_readwrite("half2_vectorization", &CompileConfig::half2_vectorization)
       .def_readwrite("make_cpu_multithreading_loop",
                      &CompileConfig::make_cpu_multithreading_loop)
+      .def_readwrite("noalias_snode", &CompileConfig::noalias_snode)
       .def_readwrite("quant_opt_store_fusion",
                      &CompileConfig::quant_opt_store_fusion)
       .def_readwrite("quant_opt_atomic_demotion",
