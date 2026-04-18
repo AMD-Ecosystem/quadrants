@@ -583,7 +583,7 @@ void TaskCodeGenLLVM::visit(BinaryOpStmt *stmt) {
       llvm_val[stmt] =
           call("debug_add_" + stmt->ret_type->to_string(), get_arg(0),
                llvm_val[stmt->lhs], llvm_val[stmt->rhs],
-               builder->CreateGlobalStringPtr(stmt->get_tb()));
+               builder->CreateGlobalString(stmt->get_tb()));
 #endif
     } else {
       llvm_val[stmt] =
@@ -598,7 +598,7 @@ void TaskCodeGenLLVM::visit(BinaryOpStmt *stmt) {
       llvm_val[stmt] =
           call("debug_sub_" + stmt->ret_type->to_string(), get_arg(0),
                llvm_val[stmt->lhs], llvm_val[stmt->rhs],
-               builder->CreateGlobalStringPtr(stmt->get_tb()));
+               builder->CreateGlobalString(stmt->get_tb()));
 #endif
     } else {
       llvm_val[stmt] =
@@ -613,7 +613,7 @@ void TaskCodeGenLLVM::visit(BinaryOpStmt *stmt) {
       llvm_val[stmt] =
           call("debug_mul_" + stmt->ret_type->to_string(), get_arg(0),
                llvm_val[stmt->lhs], llvm_val[stmt->rhs],
-               builder->CreateGlobalStringPtr(stmt->get_tb()));
+               builder->CreateGlobalString(stmt->get_tb()));
 #endif
     } else {
       llvm_val[stmt] =
@@ -660,7 +660,7 @@ void TaskCodeGenLLVM::visit(BinaryOpStmt *stmt) {
       llvm_val[stmt] =
           call("debug_shl_" + stmt->ret_type->to_string(), get_arg(0),
                llvm_val[stmt->lhs], llvm_val[stmt->rhs],
-               builder->CreateGlobalStringPtr(stmt->get_tb()));
+               builder->CreateGlobalString(stmt->get_tb()));
     } else {
       llvm_val[stmt] =
           builder->CreateShl(llvm_val[stmt->lhs], llvm_val[stmt->rhs]);
@@ -923,7 +923,7 @@ llvm::Value *TaskCodeGenLLVM::create_print(std::string tag,
   std::vector<llvm::Value *> args;
   std::string format = data_type_format(dt);
   auto runtime_printf = call("LLVMRuntime_get_host_printf", get_runtime());
-  args.push_back(builder->CreateGlobalStringPtr(
+  args.push_back(builder->CreateGlobalString(
       ("[llvm codegen debug] " + tag + " = " + format + "\n").c_str(),
       "format_string"));
   if (dt->is_primitive(PrimitiveTypeID::f32))
@@ -1018,14 +1018,14 @@ void TaskCodeGenLLVM::visit(PrintStmt *stmt) {
       }
     } else {
       auto arg_str = std::get<std::string>(content);
-      auto value = builder->CreateGlobalStringPtr(arg_str, "content_string");
+      auto value = builder->CreateGlobalString(arg_str, "content_string");
       args.push_back(value);
       formats += "%s";
     }
   }
   auto runtime_printf = call("LLVMRuntime_get_host_printf", get_runtime());
   args.insert(args.begin(),
-              builder->CreateGlobalStringPtr(formats.c_str(), "format_string"));
+              builder->CreateGlobalString(formats.c_str(), "format_string"));
   auto func_type_func = get_runtime_function("get_func_type_host_printf");
   llvm_val[stmt] =
       call(runtime_printf, func_type_func->getFunctionType(), std::move(args));
@@ -1337,7 +1337,7 @@ void TaskCodeGenLLVM::visit(AssertStmt *stmt) {
   std::vector<llvm::Value *> args;
   args.emplace_back(get_runtime());
   args.emplace_back(builder->CreateIsNotNull(llvm_val[stmt->cond]));
-  args.emplace_back(builder->CreateGlobalStringPtr(stmt->text));
+  args.emplace_back(builder->CreateGlobalString(stmt->text));
 
   for (int i = 0; i < stmt->args.size(); i++) {
     auto arg = stmt->args[i];

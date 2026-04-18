@@ -72,7 +72,7 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     }
     return LLVMModuleBuilder::call(
         builder.get(), "vprintf",
-        builder->CreateGlobalStringPtr(format, "format_string"),
+        builder->CreateGlobalString(format, "format_string"),
         builder->CreateBitCast(value_arr,
                                llvm::PointerType::getUnqual(*llvm_context)));
   }
@@ -154,7 +154,7 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
         num_contents += 1;
         auto arg_str = std::get<std::string>(content);
 
-        auto value = builder->CreateGlobalStringPtr(arg_str, "content_string");
+        auto value = builder->CreateGlobalString(arg_str, "content_string");
         auto char_type =
             llvm::Type::getInt8Ty(*tlctx->get_this_thread_context());
         auto value_type = llvm::PointerType::get(char_type, 0);

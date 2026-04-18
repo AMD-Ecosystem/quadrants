@@ -64,6 +64,8 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
     // internal body functions contain the actual FP compute.
     F.addFnAttr("unsafe-fp-math", "true");
     F.addFnAttr("no-signed-zeros-fp-math", "true");
+    F.addFnAttr("no-infs-fp-math", "true");
+    F.addFnAttr("no-nans-fp-math", "true");
 
     if (F.getCallingConv() == llvm::CallingConv::AMDGPU_KERNEL) {
       const std::string kernel_name = F.getName().str();
@@ -119,13 +121,9 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   // AMDGPU backend passes that check TargetOptions directly).
   options.AllowFPOpFusion = FPOpFusion::Fast;
   if (this->config_.fast_math) {
-    options.NoInfsFPMath = 1;
-    options.NoNaNsFPMath = 1;
     options.NoSignedZerosFPMath = 1;
     options.NoTrappingFPMath = 1;
   } else {
-    options.NoInfsFPMath = 0;
-    options.NoNaNsFPMath = 0;
     options.NoSignedZerosFPMath = 0;
     options.NoTrappingFPMath = 0;
   }
@@ -261,28 +259,27 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   QD_TRACE("Loading module...");
   [[maybe_unused]] auto _ = AMDGPUContext::get_instance().get_lock_guard();
 
-  // Try to find ld.lld from ROCm installation, fallback to system PATH
+  // Resolve ld.lld: QD_LLD_PATH > ROCM_PATH > common paths > system PATH
   std::string lld_executable = "ld.lld";
-  const char *rocm_path = std::getenv("ROCM_PATH");
-  if (rocm_path) {
-    std::string rocm_lld = std::string(rocm_path) + "/llvm/bin/ld.lld";
-    std::ifstream test_lld(rocm_lld);
-    if (test_lld.good()) {
-      lld_executable = rocm_lld;
+  const char *lld_override = std::getenv("QD_LLD_PATH");
+  if (lld_override && std::ifstream(lld_override).good()) {
+    lld_executable = lld_override;
+  } else {
+    const char *rocm_path = std::getenv("ROCM_PATH");
+    if (rocm_path) {
+      std::string rocm_lld = std::string(rocm_path) + "/llvm/bin/ld.lld";
+      if (std::ifstream(rocm_lld).good()) {
+        lld_executable = rocm_lld;
+      }
     }
-  }
-  // Also try common ROCm installation paths
-  if (lld_executable == "ld.lld") {
-    std::vector<std::string> common_paths = {
-        "/opt/rocm/llvm/bin/ld.lld",
-        "/opt/rocm-7.0.0/llvm/bin/ld.lld",
-        "/opt/rocm-6.0.0/llvm/bin/ld.lld",
-    };
-    for (const auto &path : common_paths) {
-      std::ifstream test_lld(path);
-      if (test_lld.good()) {
-        lld_executable = path;
-        break;
+    if (lld_executable == "ld.lld") {
+      for (const auto &path : {"/opt/rocm/llvm/bin/ld.lld",
+                                "/opt/rocm-7.0.0/llvm/bin/ld.lld",
+                                "/opt/rocm-6.0.0/llvm/bin/ld.lld"}) {
+        if (std::ifstream(path).good()) {
+          lld_executable = path;
+          break;
+        }
       }
     }
   }

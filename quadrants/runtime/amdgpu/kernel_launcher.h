@@ -24,13 +24,16 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
  private:
   void launch_offloaded_tasks(
-      LaunchContextBuilder &ctx,
       JITModule *amdgpu_module,
-      const std::vector<OffloadedTask> &offloaded_tasks);
+      const std::vector<OffloadedTask> &offloaded_tasks,
+      void *context_pointer,
+      int arg_size);
   void launch_offloaded_tasks_with_do_while(
       LaunchContextBuilder &ctx,
       JITModule *amdgpu_module,
-      const std::vector<OffloadedTask> &offloaded_tasks);
+      const std::vector<OffloadedTask> &offloaded_tasks,
+      void *context_pointer,
+      int arg_size);
   bool on_amdgpu_device(void *ptr);
   std::vector<Context> contexts_;
 };

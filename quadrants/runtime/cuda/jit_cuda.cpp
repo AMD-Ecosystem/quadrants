@@ -257,15 +257,10 @@ std::string JITSessionCUDA::compile_module_to_ptx(
   TargetOptions options;
   if (this->config_.fast_math) {
     options.AllowFPOpFusion = FPOpFusion::Fast;
-    // UnsafeFPMath was removed in LLVM 22; set the individual flags it implied
-    options.NoInfsFPMath = 1;
-    options.NoNaNsFPMath = 1;
     options.NoSignedZerosFPMath = 1;
     options.NoTrappingFPMath = 1;
   } else {
     options.AllowFPOpFusion = FPOpFusion::Strict;
-    options.NoInfsFPMath = 0;
-    options.NoNaNsFPMath = 0;
     options.NoSignedZerosFPMath = 0;
     options.NoTrappingFPMath = 0;
   }

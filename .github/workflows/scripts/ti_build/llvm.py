@@ -49,6 +49,9 @@ def setup_llvm() -> str:
 
     # We should use LLVM toolchains shipped with OS.
     # path_prepend('PATH', out / 'bin')
+    if "LLVM_DIR" in os.environ:
+        print(f"Using user-provided LLVM_DIR={os.environ['LLVM_DIR']}")
+        return os.environ["LLVM_DIR"]
     os.environ["LLVM_DIR"] = str(out)
     return str(out)
 
