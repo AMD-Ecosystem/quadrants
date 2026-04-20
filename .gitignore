@@ -97,3 +97,6 @@ stubs/
 CHANGELOG.md
 python/quadrants/_version.py
 env.sh
+
+# Unified dev container marker (genesis-rocm Dockerfile.dev)
+.dev-installed
