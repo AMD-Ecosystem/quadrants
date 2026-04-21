@@ -586,6 +586,94 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
           "block_dim", llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0));
       patch_amdgpu_kernel_dim(
           "grid_dim", llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0));
+
+      // AMDGPU warp shuffle lowering via llvm.amdgcn.ds.bpermute
+      // ds.bpermute reads from the lane specified by (byte_offset >> 2) in the
+      // same wavefront. For wave64 (CDNA3/gfx942), we address all 64 lanes.
+      // Signature: i32 @llvm.amdgcn.ds.bpermute(i32 byte_idx, i32 src_val)
+      //
+      // op_type: 0 = xor (lane ^ delta), 1 = down ((lane + delta) & 63),
+      //          2 = sync/idx (delta & 63)
+      auto patch_shfl_amdgpu = [&](std::string name, int op_type, bool is_f32) {
+        auto func = module->getFunction(name);
+        if (!func) {
+          return;
+        }
+        func->deleteBody();
+        auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+        IRBuilder<> builder(*ctx);
+        builder.SetInsertPoint(bb);
+
+        auto i32_ty = llvm::Type::getInt32Ty(*ctx);
+        auto f32_ty = llvm::Type::getFloatTy(*ctx);
+
+        // Function args: (u32 mask, <ty> val, i32 delta, int width)
+        // mask and width are ignored on AMDGPU (full wave always participates)
+        auto arg_it = func->arg_begin();
+        ++arg_it; // skip mask
+        llvm::Value *val = &*(arg_it++);
+        llvm::Value *delta = &*(arg_it++);
+        // width is ignored
+
+        // lane = workitem_id_x() & 63  (wave64 lane id)
+        std::vector<llvm::Type *> no_types;
+        std::vector<llvm::Value *> no_args;
+        llvm::Value *lane = builder.CreateIntrinsic(
+            llvm::Intrinsic::amdgcn_workitem_id_x, no_types, no_args);
+        lane = builder.CreateAnd(lane,
+                                 llvm::ConstantInt::get(i32_ty, 63));
+
+        // Compute src_lane based on operation type
+        llvm::Value *src_lane;
+        switch (op_type) {
+        case 0: // xor: src_lane = lane ^ delta
+          src_lane = builder.CreateXor(lane, delta);
+          break;
+        case 1: // down: src_lane = (lane + delta) & 63
+          src_lane = builder.CreateAdd(lane, delta);
+          src_lane = builder.CreateAnd(src_lane,
+                                       llvm::ConstantInt::get(i32_ty, 63));
+          break;
+        case 2: // sync/idx: src_lane = delta & 63
+          src_lane = builder.CreateAnd(delta,
+                                       llvm::ConstantInt::get(i32_ty, 63));
+          break;
+        default:
+          QD_ERROR("Unknown shuffle op_type");
+        }
+
+        // byte_idx = src_lane << 2 (ds.bpermute addresses by DWORD bytes)
+        auto byte_idx = builder.CreateShl(src_lane,
+                                          llvm::ConstantInt::get(i32_ty, 2));
+
+        llvm::Value *result;
+        if (is_f32) {
+          // f32: bitcast to i32, shuffle, bitcast back
+          auto val_i32 = builder.CreateBitCast(val, i32_ty);
+          std::vector<llvm::Value *> bpermute_args_f32 = {byte_idx, val_i32};
+          auto shuffled = builder.CreateIntrinsic(
+              llvm::Intrinsic::amdgcn_ds_bpermute, no_types, bpermute_args_f32);
+          result = builder.CreateBitCast(shuffled, f32_ty);
+        } else {
+          // i32: shuffle directly
+          std::vector<llvm::Value *> bpermute_args_i32 = {byte_idx, val};
+          result = builder.CreateIntrinsic(
+              llvm::Intrinsic::amdgcn_ds_bpermute, no_types, bpermute_args_i32);
+        }
+
+        builder.CreateRet(result);
+        QuadrantsLLVMContext::mark_inline(func);
+      };
+
+      // Wire up all shuffle operations for AMDGPU
+      // op_type: 0 = xor, 1 = down, 2 = sync/idx
+      patch_shfl_amdgpu("cuda_shfl_xor_sync_i32", 0, false);
+      patch_shfl_amdgpu("cuda_shfl_xor_sync_f32", 0, true);
+      patch_shfl_amdgpu("cuda_shfl_down_sync_i32", 1, false);
+      patch_shfl_amdgpu("cuda_shfl_down_sync_f32", 1, true);
+      patch_shfl_amdgpu("cuda_shfl_sync_i32", 2, false);
+      patch_shfl_amdgpu("cuda_shfl_sync_f32", 2, true);
+      // Note: shfl_up is not patched (not used by Genesis yet)
 #endif
     }
   }

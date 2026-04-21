@@ -555,3 +555,204 @@ def test_subgroup_reduction_max_f32():
 @test_utils.test(arch=qd.vulkan)
 def test_subgroup_reduction_min_f32():
     _test_subgroup_reduce(qd.atomic_max, subgroup.reduce_max, np.max, 2677, 0, qd.f32)
+
+
+# =============================================================================
+# AMDGPU wave64 shuffle tests
+# =============================================================================
+# These tests validate warp shuffle operations on AMDGPU with 64-lane wavefronts.
+# The butterfly reduction with offsets [32, 16, 8, 4, 2, 1] reduces all 64 lanes.
+# For shfl_xor: every lane ends up with the full sum.
+# For shfl_down: only lane 0 ends up with the full sum.
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_shfl_xor_f32_wave64_butterfly():
+    """Butterfly sum via shfl_xor_f32 on wave64. Every lane should hold sum(0..63) = 2016."""
+    WARP = 64
+    result = qd.field(dtype=qd.f32, shape=WARP)
+
+    @qd.kernel
+    def butterfly_xor_sum():
+        qd.loop_config(block_dim=WARP)
+        for i in range(WARP):
+            val = qd.cast(i, qd.f32)
+            # 6-round butterfly with xor - all lanes get the sum
+            for offset in qd.static([32, 16, 8, 4, 2, 1]):
+                val = val + qd.simt.warp.shfl_xor_f32(qd.u32(0xFFFFFFFF), val, offset)
+            result[i] = val
+
+    butterfly_xor_sum()
+
+    # sum(0..63) = 63*64/2 = 2016
+    for i in range(WARP):
+        assert result[i] == approx(2016.0, abs=1e-3), f"Lane {i}: expected 2016, got {result[i]}"
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_shfl_xor_f32_wave64_butterfly_fractional():
+    """Butterfly sum via shfl_xor_f32 with fractional values to verify bitcast round-trip.
+
+    Uses values with non-trivial fractional parts (lane * 0.5 + 0.125) to ensure
+    the f32 -> i32 bitcast -> ds.bpermute -> i32 -> f32 bitcast preserves IEEE 754
+    bit patterns correctly through all 6 shuffle rounds.
+    """
+    WARP = 64
+    result = qd.field(dtype=qd.f32, shape=WARP)
+
+    @qd.kernel
+    def butterfly_xor_sum_fractional():
+        qd.loop_config(block_dim=WARP)
+        for i in range(WARP):
+            # Fractional values: 0.125, 0.625, 1.125, ..., 31.625
+            val = qd.cast(i, qd.f32) * 0.5 + 0.125
+            # 6-round butterfly with xor - all lanes get the sum
+            for offset in qd.static([32, 16, 8, 4, 2, 1]):
+                val = val + qd.simt.warp.shfl_xor_f32(qd.u32(0xFFFFFFFF), val, offset)
+            result[i] = val
+
+    butterfly_xor_sum_fractional()
+
+    # sum(i * 0.5 + 0.125 for i in 0..63) = 0.5 * 2016 + 64 * 0.125 = 1008 + 8 = 1016
+    for i in range(WARP):
+        assert result[i] == approx(1016.0, abs=1e-2), f"Lane {i}: expected 1016.0, got {result[i]}"
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_shfl_xor_i32_wave64_butterfly():
+    """Butterfly sum via shfl_xor_i32 on wave64. Every lane should hold sum(0..63) = 2016."""
+    WARP = 64
+    result = qd.field(dtype=qd.i32, shape=WARP)
+
+    @qd.kernel
+    def butterfly_xor_sum():
+        qd.loop_config(block_dim=WARP)
+        for i in range(WARP):
+            val = i
+            # 6-round butterfly with xor - all lanes get the sum
+            for offset in qd.static([32, 16, 8, 4, 2, 1]):
+                val = val + qd.simt.warp.shfl_xor_i32(qd.u32(0xFFFFFFFF), val, offset)
+            result[i] = val
+
+    butterfly_xor_sum()
+
+    # sum(0..63) = 63*64/2 = 2016
+    for i in range(WARP):
+        assert result[i] == 2016, f"Lane {i}: expected 2016, got {result[i]}"
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_shfl_down_f32_wave64_butterfly():
+    """Butterfly sum via shfl_down_f32 on wave64. Lane 0 should hold sum(0..63) = 2016."""
+    WARP = 64
+    result = qd.field(dtype=qd.f32, shape=WARP)
+
+    @qd.kernel
+    def butterfly_down_sum():
+        qd.loop_config(block_dim=WARP)
+        for i in range(WARP):
+            val = qd.cast(i, qd.f32)
+            # 6-round butterfly with down - only lane 0 gets the full sum
+            for offset in qd.static([32, 16, 8, 4, 2, 1]):
+                val = val + qd.simt.warp.shfl_down_f32(qd.u32(0xFFFFFFFF), val, offset)
+            result[i] = val
+
+    butterfly_down_sum()
+
+    # Lane 0 should have the full sum
+    assert result[0] == approx(2016.0, abs=1e-3), f"Lane 0: expected 2016, got {result[0]}"
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_shfl_down_i32_wave64_butterfly():
+    """Butterfly sum via shfl_down_i32 on wave64. Lane 0 should hold sum(0..63) = 2016."""
+    WARP = 64
+    result = qd.field(dtype=qd.i32, shape=WARP)
+
+    @qd.kernel
+    def butterfly_down_sum():
+        qd.loop_config(block_dim=WARP)
+        for i in range(WARP):
+            val = i
+            # 6-round butterfly with down - only lane 0 gets the full sum
+            for offset in qd.static([32, 16, 8, 4, 2, 1]):
+                val = val + qd.simt.warp.shfl_down_i32(qd.u32(0xFFFFFFFF), val, offset)
+            result[i] = val
+
+    butterfly_down_sum()
+
+    # Lane 0 should have the full sum
+    assert result[0] == 2016, f"Lane 0: expected 2016, got {result[0]}"
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_shfl_sync_f32_wave64():
+    """Test shfl_sync_f32 (broadcast from specific lane) on wave64."""
+    WARP = 64
+    result = qd.field(dtype=qd.f32, shape=WARP)
+
+    @qd.kernel
+    def broadcast_from_lane_42():
+        qd.loop_config(block_dim=WARP)
+        for i in range(WARP):
+            val = qd.cast(i * 2, qd.f32)  # Each lane has its index * 2
+            # Broadcast from lane 42 (which has value 84.0)
+            val = qd.simt.warp.shfl_sync_f32(qd.u32(0xFFFFFFFF), val, 42)
+            result[i] = val
+
+    broadcast_from_lane_42()
+
+    # All lanes should have value from lane 42 = 84.0
+    for i in range(WARP):
+        assert result[i] == approx(84.0, abs=1e-4), f"Lane {i}: expected 84.0, got {result[i]}"
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_shfl_sync_i32_wave64():
+    """Test shfl_sync_i32 (broadcast from specific lane) on wave64."""
+    WARP = 64
+    result = qd.field(dtype=qd.i32, shape=WARP)
+
+    @qd.kernel
+    def broadcast_from_lane_42():
+        qd.loop_config(block_dim=WARP)
+        for i in range(WARP):
+            val = i * 2  # Each lane has its index * 2
+            # Broadcast from lane 42 (which has value 84)
+            val = qd.simt.warp.shfl_sync_i32(qd.u32(0xFFFFFFFF), val, 42)
+            result[i] = val
+
+    broadcast_from_lane_42()
+
+    # All lanes should have value from lane 42 = 84
+    for i in range(WARP):
+        assert result[i] == 84, f"Lane {i}: expected 84, got {result[i]}"
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_shfl_xor_f32_wave64_asymmetric():
+    """Test shfl_xor_f32 with asymmetric values to catch wrap-around bugs."""
+    WARP = 64
+    result = qd.field(dtype=qd.f32, shape=WARP)
+    input_vals = qd.field(dtype=qd.f32, shape=WARP)
+
+    # Use prime-spaced values that would fail if wrap-around is wrong
+    for i in range(WARP):
+        input_vals[i] = (i * 17 + 3) % 100 + 0.5
+
+    @qd.kernel
+    def asymmetric_xor():
+        qd.loop_config(block_dim=WARP)
+        for i in range(WARP):
+            val = input_vals[i]
+            # Single xor with offset 32 - swaps upper and lower halves
+            val = qd.simt.warp.shfl_xor_f32(qd.u32(0xFFFFFFFF), val, 32)
+            result[i] = val
+
+    asymmetric_xor()
+
+    # Lane i should have value from lane (i ^ 32)
+    for i in range(WARP):
+        expected = input_vals[i ^ 32]
+        assert result[i] == approx(expected, abs=1e-4), \
+            f"Lane {i}: expected {expected} from lane {i ^ 32}, got {result[i]}"

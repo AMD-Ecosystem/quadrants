@@ -347,6 +347,7 @@ void Operations::init_internals() {
   CUDA_SHFL_SYNC(shfl_up, i32);
   CUDA_SHFL_SYNC(shfl_down, i32);
   CUDA_SHFL_SYNC(shfl_xor, i32);
+  CUDA_SHFL_SYNC(shfl_xor, f32);
   CUDA_SHFL_SYNC(shfl, f32);
   CUDA_SHFL_SYNC(shfl_up, f32);
   CUDA_SHFL_SYNC(shfl_down, f32);

@@ -53,6 +53,18 @@ def shfl_xor_i32(mask, val, offset):
     return impl.call_internal("cuda_shfl_xor_sync_i32", mask, val, offset, 31, with_runtime_context=False)
 
 
+def shfl_xor_f32(mask, val, offset):
+    # shfl_xor_f32 is only implemented for AMDGPU (via ds.bpermute lowering).
+    # CUDA/NVPTX lowering is not implemented - the stub returns 0, which is wrong.
+    cuda_cc = impl.get_cuda_compute_capability()
+    if cuda_cc is not None and cuda_cc > 0:
+        raise NotImplementedError(
+            "shfl_xor_f32 is only supported on AMDGPU backend. "
+            "CUDA/NVPTX lowering is not implemented."
+        )
+    return impl.call_internal("cuda_shfl_xor_sync_f32", mask, val, offset, 31, with_runtime_context=False)
+
+
 def match_any(mask, value):
     # These intrinsics are only available on compute_70 or higher
     # https://docs.nvidia.com/cuda/pdf/NVVM_IR_Specification.pdf
@@ -89,6 +101,7 @@ __all__ = [
     "shfl_down_i32",
     "shfl_down_f32",
     "shfl_xor_i32",
+    "shfl_xor_f32",
     "match_any",
     "match_all",
     "active_mask",
