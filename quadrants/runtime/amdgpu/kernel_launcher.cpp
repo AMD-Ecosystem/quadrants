@@ -1,5 +1,8 @@
+#include <map>
+
 #include "quadrants/runtime/amdgpu/kernel_launcher.h"
 #include "quadrants/rhi/amdgpu/amdgpu_context.h"
+#include "quadrants/rhi/amdgpu/amdgpu_driver.h"
 #include "quadrants/program/launch_context_builder.h"
 
 namespace quadrants::lang {
@@ -60,10 +63,14 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       transfers;
   std::unordered_map<ArgArrayPtrKey, void *, ArgArrayPtrKeyHasher> device_ptrs;
 
+  auto *active_stream = AMDGPUContext::get_instance().get_stream();
+
   char *device_result_buffer{nullptr};
+  // Must always allocate device_result_buffer (even when result_buffer_size
+  // is 0) to avoid memory access faults from allocate_memory_on_device below.
   AMDGPUDriver::get_instance().malloc_async(
       (void **)&device_result_buffer,
-      std::max(ctx.result_buffer_size, sizeof(uint64)), nullptr);
+      std::max(ctx.result_buffer_size, sizeof(uint64)), active_stream);
 
   for (int i = 0; i < (int)parameters.size(); i++) {
     const auto &kv = parameters[i];
@@ -89,8 +96,9 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
               executor->get_device_alloc_info_ptr(devalloc);
           transfers[data_ptr_idx] = {data_ptr, devalloc};
 
-          AMDGPUDriver::get_instance().memcpy_host_to_device(
-              (void *)device_ptrs[data_ptr_idx], data_ptr, arr_sz);
+          AMDGPUDriver::get_instance().memcpy_host_to_device_async(
+              (void *)device_ptrs[data_ptr_idx], data_ptr, arr_sz,
+              active_stream);
         }
         ctx.set_ndarray_ptrs(arg_id, (uint64)device_ptrs[data_ptr_idx],
                              (uint64)ctx.array_ptrs[grad_ptr_idx]);
@@ -112,50 +120,100 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     }
   }
   if (transfers.size() > 0) {
-    AMDGPUDriver::get_instance().stream_synchronize(nullptr);
+    AMDGPUDriver::get_instance().stream_synchronize(active_stream);
   }
   char *host_result_buffer = (char *)ctx.get_context().result_buffer;
   if (ctx.result_buffer_size > 0) {
-    // Malloc_Async and Free_Async are available after ROCm 5.4
     ctx.get_context().result_buffer = (uint64 *)device_result_buffer;
   }
   char *device_arg_buffer = nullptr;
   if (ctx.arg_buffer_size > 0) {
-    AMDGPUDriver::get_instance().malloc_async((void **)&device_arg_buffer,
-                                              ctx.arg_buffer_size, nullptr);
-    // Async H2D so the arg-buffer staging copy can overlap with the kernel
-    // launch path / driver bookkeeping. Mirrors CUDA launcher behaviour.
+    AMDGPUDriver::get_instance().malloc_async(
+        (void **)&device_arg_buffer, ctx.arg_buffer_size, active_stream);
     AMDGPUDriver::get_instance().memcpy_host_to_device_async(
         device_arg_buffer, ctx.get_context().arg_buffer, ctx.arg_buffer_size,
-        nullptr);
+        active_stream);
     ctx.get_context().arg_buffer = device_arg_buffer;
   }
+  void *context_pointer;
+  int arg_size = sizeof(RuntimeContext *);
+  AMDGPUDriver::get_instance().malloc_async(
+      (void **)&context_pointer, sizeof(RuntimeContext), active_stream);
+  AMDGPUDriver::get_instance().memcpy_host_to_device_async(
+      context_pointer, &ctx.get_context(), sizeof(RuntimeContext),
+      active_stream);
 
+  AMDGPUContext::get_instance().push_back_kernel_arg_pointer(context_pointer);
+
+  // NOTE: the original perf/async-hip-memcpy branch routed all ops through
+  // the default stream (nullptr); the streams series supersedes that by
+  // routing to a per-thread active_stream and adding stream_parallel group
+  // dispatch (acquire_stream / release_stream pool below).
   if (ctx.graph_do_while_arg_id >= 0) {
     QD_ASSERT(ctx.graph_do_while_flag_dev_ptr);
     launch_offloaded_tasks_with_do_while(ctx, amdgpu_module, offloaded_tasks);
   } else {
-    launch_offloaded_tasks(ctx, amdgpu_module, offloaded_tasks);
+    for (size_t i = 0; i < offloaded_tasks.size();) {
+      auto &task = offloaded_tasks[i];
+      if (task.stream_parallel_group_id == 0) {
+        QD_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
+                 task.block_dim);
+        amdgpu_module->launch(task.name, task.grid_dim, task.block_dim,
+                              task.dynamic_shared_array_bytes,
+                              {(void *)&context_pointer}, {arg_size});
+        i++;
+      } else {
+        size_t group_start = i;
+        while (i < offloaded_tasks.size() &&
+               offloaded_tasks[i].stream_parallel_group_id != 0) {
+          i++;
+        }
+
+        std::map<int, void *> stream_by_id;
+        for (size_t j = group_start; j < i; j++) {
+          int sid = offloaded_tasks[j].stream_parallel_group_id;
+          if (stream_by_id.find(sid) == stream_by_id.end()) {
+            stream_by_id[sid] = AMDGPUContext::get_instance().acquire_stream();
+          }
+        }
+
+        // Launch tasks concurrently on their respective streams. The shared
+        // RuntimeContext is safe here: kernels only read from it (args/runtime
+        // pointers); result_buffer writes are to disjoint offsets per task.
+        for (size_t j = group_start; j < i; j++) {
+          auto &t = offloaded_tasks[j];
+          AMDGPUContext::get_instance().set_stream(
+              stream_by_id[t.stream_parallel_group_id]);
+          amdgpu_module->launch(t.name, t.grid_dim, t.block_dim,
+                                t.dynamic_shared_array_bytes,
+                                {(void *)&context_pointer}, {arg_size});
+        }
+
+        for (auto &[sid, s] : stream_by_id) {
+          AMDGPUDriver::get_instance().stream_synchronize(s);
+        }
+        for (auto &[sid, s] : stream_by_id) {
+          AMDGPUContext::get_instance().release_stream(s);
+        }
+
+        AMDGPUContext::get_instance().set_stream(active_stream);
+      }
+    }
   }
   QD_TRACE("Launching kernel");
   if (ctx.arg_buffer_size > 0) {
-    AMDGPUDriver::get_instance().mem_free_async(device_arg_buffer, nullptr);
+    AMDGPUDriver::get_instance().mem_free_async(device_arg_buffer,
+                                                active_stream);
   }
   if (ctx.result_buffer_size > 0) {
-    // Async D2H so the result-buffer copy is enqueued behind the kernel
-    // on the stream rather than blocking the host. The caller is expected to
-    // synchronize before reading host_result_buffer (or rely on the implicit
-    // ordering on the default stream when the next op is enqueued).
     AMDGPUDriver::get_instance().memcpy_device_to_host_async(
         host_result_buffer, device_result_buffer, ctx.result_buffer_size,
-        nullptr);
+        active_stream);
   }
-  // Free the result buffer on the stream before the transfers-back sync,
-  // batching the free into the pipeline (matches CUDA launcher ordering).
-  AMDGPUDriver::get_instance().mem_free_async(device_result_buffer, nullptr);
+  AMDGPUDriver::get_instance().mem_free_async(device_result_buffer,
+                                              active_stream);
   if (transfers.size()) {
-    // Sync once for the entire batch of external-array readbacks.
-    AMDGPUDriver::get_instance().stream_synchronize(nullptr);
+    AMDGPUDriver::get_instance().stream_synchronize(active_stream);
     for (auto itr = transfers.begin(); itr != transfers.end(); itr++) {
       auto &idx = itr->first;
       auto arg_id = idx.arg_id;

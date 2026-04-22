@@ -1,6 +1,9 @@
+#include <map>
+
 #include "quadrants/runtime/cuda/kernel_launcher.h"
 #include "quadrants/runtime/cuda/cuda_utils.h"
 #include "quadrants/rhi/cuda/cuda_context.h"
+#include "quadrants/rhi/cuda/cuda_driver.h"
 
 #include <vector>
 
@@ -77,10 +80,12 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   // kernels.
   std::unordered_map<ArgArrayPtrKey, void *, ArgArrayPtrKeyHasher> device_ptrs;
 
+  auto *active_stream = CUDAContext::get_instance().get_stream();
+
   char *device_result_buffer{nullptr};
   CUDADriver::get_instance().malloc_async(
       (void **)&device_result_buffer,
-      std::max(ctx.result_buffer_size, sizeof(uint64)), nullptr);
+      std::max(ctx.result_buffer_size, sizeof(uint64)), active_stream);
   ctx.get_context().runtime = executor->get_llvm_runtime();
 
   for (int i = 0; i < (int)parameters.size(); i++) {
@@ -116,8 +121,9 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
               executor->get_device_alloc_info_ptr(devalloc);
           transfers[data_ptr_idx] = {data_ptr, devalloc};
 
-          CUDADriver::get_instance().memcpy_host_to_device(
-              (void *)device_ptrs[data_ptr_idx], data_ptr, arr_sz);
+          CUDADriver::get_instance().memcpy_host_to_device_async(
+              (void *)device_ptrs[data_ptr_idx], data_ptr, arr_sz,
+              active_stream);
           if (grad_ptr != nullptr) {
             DeviceAllocation grad_devalloc =
                 executor->allocate_memory_on_device(
@@ -126,8 +132,9 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
                 executor->get_device_alloc_info_ptr(grad_devalloc);
             transfers[grad_ptr_idx] = {grad_ptr, grad_devalloc};
 
-            CUDADriver::get_instance().memcpy_host_to_device(
-                (void *)device_ptrs[grad_ptr_idx], grad_ptr, arr_sz);
+            CUDADriver::get_instance().memcpy_host_to_device_async(
+                (void *)device_ptrs[grad_ptr_idx], grad_ptr, arr_sz,
+                active_stream);
           } else {
             device_ptrs[grad_ptr_idx] = nullptr;
           }
@@ -160,7 +167,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     }
   }
   if (transfers.size() > 0) {
-    CUDADriver::get_instance().stream_synchronize(nullptr);
+    CUDADriver::get_instance().stream_synchronize(active_stream);
   }
   char *host_result_buffer = (char *)ctx.get_context().result_buffer;
   if (ctx.result_buffer_size > 0) {
@@ -169,31 +176,79 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   char *device_arg_buffer = nullptr;
   if (ctx.arg_buffer_size > 0) {
     CUDADriver::get_instance().malloc_async((void **)&device_arg_buffer,
-                                            ctx.arg_buffer_size, nullptr);
+                                            ctx.arg_buffer_size, active_stream);
     CUDADriver::get_instance().memcpy_host_to_device_async(
         device_arg_buffer, ctx.get_context().arg_buffer, ctx.arg_buffer_size,
-        nullptr);
+        active_stream);
     ctx.get_context().arg_buffer = device_arg_buffer;
   }
 
+  // Combine graph_do_while support (from amd-integration) with streams /
+  // stream_parallel group dispatch (from hp/streams-quadrantsic-*).
   if (ctx.graph_do_while_arg_id >= 0) {
     QD_ASSERT(ctx.graph_do_while_flag_dev_ptr);
     launch_offloaded_tasks_with_do_while(ctx, cuda_module, offloaded_tasks);
   } else {
-    launch_offloaded_tasks(ctx, cuda_module, offloaded_tasks);
+    for (size_t i = 0; i < offloaded_tasks.size();) {
+      auto &task = offloaded_tasks[i];
+      if (task.stream_parallel_group_id == 0) {
+        QD_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
+                 task.block_dim);
+        cuda_module->launch(task.name, task.grid_dim, task.block_dim,
+                            task.dynamic_shared_array_bytes,
+                            {&ctx.get_context()}, {});
+        i++;
+      } else {
+        size_t group_start = i;
+        while (i < offloaded_tasks.size() &&
+               offloaded_tasks[i].stream_parallel_group_id != 0) {
+          i++;
+        }
+
+        std::map<int, void *> stream_by_id;
+        for (size_t j = group_start; j < i; j++) {
+          int sid = offloaded_tasks[j].stream_parallel_group_id;
+          if (stream_by_id.find(sid) == stream_by_id.end()) {
+            stream_by_id[sid] = CUDAContext::get_instance().acquire_stream();
+          }
+        }
+
+        // Launch tasks concurrently on their respective streams. The shared
+        // RuntimeContext is safe here: kernels only read from it (args/runtime
+        // pointers); result_buffer writes are to disjoint offsets per task.
+        for (size_t j = group_start; j < i; j++) {
+          auto &t = offloaded_tasks[j];
+          CUDAContext::get_instance().set_stream(
+              stream_by_id[t.stream_parallel_group_id]);
+          cuda_module->launch(t.name, t.grid_dim, t.block_dim,
+                              t.dynamic_shared_array_bytes,
+                              {&ctx.get_context()}, {});
+        }
+
+        for (auto &[sid, s] : stream_by_id) {
+          CUDADriver::get_instance().stream_synchronize(s);
+        }
+        for (auto &[sid, s] : stream_by_id) {
+          CUDAContext::get_instance().release_stream(s);
+        }
+
+        CUDAContext::get_instance().set_stream(active_stream);
+      }
+    }
   }
   if (ctx.arg_buffer_size > 0) {
-    CUDADriver::get_instance().mem_free_async(device_arg_buffer, nullptr);
+    CUDADriver::get_instance().mem_free_async(device_arg_buffer, active_stream);
   }
   if (ctx.result_buffer_size > 0) {
     CUDADriver::get_instance().memcpy_device_to_host_async(
         host_result_buffer, device_result_buffer, ctx.result_buffer_size,
-        nullptr);
+        active_stream);
   }
-  CUDADriver::get_instance().mem_free_async(device_result_buffer, nullptr);
+  CUDADriver::get_instance().mem_free_async(device_result_buffer,
+                                            active_stream);
   // copy data back to host
   if (transfers.size() > 0) {
-    CUDADriver::get_instance().stream_synchronize(nullptr);
+    CUDADriver::get_instance().stream_synchronize(active_stream);
     for (auto itr = transfers.begin(); itr != transfers.end(); itr++) {
       auto &idx = itr->first;
       CUDADriver::get_instance().memcpy_device_to_host(
