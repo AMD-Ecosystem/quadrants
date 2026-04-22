@@ -2028,8 +2028,12 @@ std::string TaskCodeGenLLVM::init_offloaded_task_function(OffloadedStmt *stmt,
       llvm::FunctionType::get(llvm::Type::getVoidTy(*llvm_context),
                               {context_param_type}, false);
 
-  auto task_kernel_name = fmt::format(
-      "{}_{}_{}{}", kernel_name, task_codegen_id, stmt->task_name(), suffix);
+  auto task_kernel_name =
+      stmt->loop_name.empty()
+          ? fmt::format("{}_{}_{}{}", kernel_name, task_codegen_id,
+                        stmt->task_name(), suffix)
+          : fmt::format("{}_{}_{}_{}{}", kernel_name, task_codegen_id,
+                        stmt->loop_name, stmt->task_name(), suffix);
   func = llvm::Function::Create(task_function_type,
                                 llvm::Function::ExternalLinkage,
                                 task_kernel_name, module.get());

@@ -36,7 +36,7 @@ interop
 :maxdepth: 1
 :titlesonly:
 
-cuda_graph
+graph
 perf_dispatch
 ```
 

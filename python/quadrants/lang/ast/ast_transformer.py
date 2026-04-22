@@ -147,7 +147,7 @@ class ASTTransformer(Builder):
 
         # Keep all generated assign statements and compose single one at last.
         # The variable is introduced to support chained assignments.
-        # Ref https://github.com/taichi-dev/quadrants/issues/2659.
+        # Ref https://github.com/taichi-dev/taichi/issues/2659.
         values = node.value.ptr if is_static_assign else impl.expr_init(node.value.ptr)
 
         for node_target in node.targets:
@@ -1222,8 +1222,8 @@ class ASTTransformer(Builder):
                     f"parameter of kernel {kernel.func.__name__!r}. "
                     f"Available parameters: {arg_names}"
                 )
-            if not kernel.use_cuda_graph:
-                raise QuadrantsSyntaxError("qd.graph_do_while() requires @qd.kernel(cuda_graph=True)")
+            if not kernel.use_graph:
+                raise QuadrantsSyntaxError("qd.graph_do_while() requires @qd.kernel(graph=True)")
             kernel.graph_do_while_arg = graph_do_while_arg
             build_stmts(ctx, node.body)
             return None

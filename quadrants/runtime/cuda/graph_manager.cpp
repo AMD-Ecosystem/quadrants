@@ -1,4 +1,4 @@
-#include "quadrants/runtime/cuda/cuda_graph_manager.h"
+#include "quadrants/runtime/cuda/graph_manager.h"
 #include "quadrants/runtime/cuda/cuda_utils.h"
 #include "quadrants/rhi/cuda/cuda_context.h"
 
@@ -11,71 +11,95 @@ namespace quadrants::lang {
 namespace cuda {
 
 // Condition kernel for graph_do_while. Reads the user's i32 loop-control flag
-// from GPU memory and tells the CUDA graph's conditional while node whether to
-// run another iteration — all without returning to the host.
+// from GPU memory via an indirection slot, and tells the CUDA graph's
+// conditional while node whether to run another iteration.
+//
+// The indirection allows swapping the counter ndarray between calls without
+// rebuilding the graph: the slot's address is baked into the graph, but the
+// pointer it contains can be updated via memcpy before each launch.
 //
 // Parameters:
 //   param_0: conditional node handle (passed to cudaGraphSetConditional)
-//   param_1: pointer to the user's qd.i32 flag ndarray on the GPU
+//   param_1: pointer to a device-side slot (void**) that holds the address
+//            of the user's qd.i32 flag ndarray
 //
-// Compiled from CUDA C with: nvcc -ptx -arch=sm_90 -rdc=true
+// Generated from graph_do_while_cond.cu — see that file for the CUDA C source
+// and instructions to regenerate this PTX.
 // Requires SM 9.0+ (Hopper) for cudaGraphSetConditional / conditional nodes.
 // Requires JIT linking with libcudadevrt.a at runtime.
 static const char *kConditionKernelPTX = R"PTX(
-.version 8.8
+.version 8.7
 .target sm_90
 .address_size 64
 
-// Declare the device-side cudaGraphSetConditional function (from libcudadevrt).
-// Takes a conditional node handle (u64) and a boolean (u32: 1=continue, 0=stop).
+        // .globl       _qd_graph_do_while_cond
 .extern .func cudaGraphSetConditional
 (
-    .param .b64 cudaGraphSetConditional_param_0,
-    .param .b32 cudaGraphSetConditional_param_1
+        .param .b64 cudaGraphSetConditional_param_0,
+        .param .b32 cudaGraphSetConditional_param_1
 )
 ;
 
-// Entry point: called by the CUDA graph's conditional while node each iteration.
-//   param_0 (u64): conditional node handle
-//   param_1 (u64): pointer to the user's qd.i32 flag in GPU global memory
 .visible .entry _qd_graph_do_while_cond(
-    .param .u64 _qd_graph_do_while_cond_param_0,
-    .param .u64 _qd_graph_do_while_cond_param_1
+        .param .u64 _qd_graph_do_while_cond_param_0,
+        .param .u64 _qd_graph_do_while_cond_param_1
 )
 {
-    .reg .pred %p<2>;
-    .reg .b32 %r<3>;
-    .reg .b64 %rd<4>;
+        .reg .pred      %p<2>;
+        .reg .b32       %r<3>;
+        .reg .b64       %rd<5>;
 
-    // Load the two kernel parameters into registers:
-    //   %rd1 = conditional node handle
-    //   %rd2 = pointer to user's i32 flag
-    ld.param.u64 %rd1, [_qd_graph_do_while_cond_param_0];
-    ld.param.u64 %rd2, [_qd_graph_do_while_cond_param_1];
 
-    // Convert generic pointer to global address space, then read the flag value
-    cvta.to.global.u64 %rd3, %rd2;
-    ld.global.u32 %r1, [%rd3];
+        ld.param.u64    %rd1, [_qd_graph_do_while_cond_param_0];
+        ld.param.u64    %rd2, [_qd_graph_do_while_cond_param_1];
+        cvta.to.global.u64      %rd3, %rd2;
+        ld.global.u64   %rd4, [%rd3];
+        ld.u32  %r1, [%rd4];
+        setp.ne.s32     %p1, %r1, 0;
+        selp.u32        %r2, 1, 0, %p1;
+        { // callseq 0, 0
+        .reg .b32 temp_param_reg;
+        .param .b64 param0;
+        st.param.b64    [param0+0], %rd1;
+        .param .b32 param1;
+        st.param.b32    [param1+0], %r2;
+        call.uni
+        cudaGraphSetConditional,
+        (
+        param0,
+        param1
+        );
+        } // callseq 0
+        ret;
 
-    // Convert flag to boolean: %r2 = (flag != 0) ? 1 : 0
-    setp.ne.s32 %p1, %r1, 0;
-    selp.u32 %r2, 1, 0, %p1;
-
-    // Tell the conditional while node whether to loop again or stop.
-    // cudaGraphSetConditional(handle, should_continue)
-    { // callseq 0, 0
-    .reg .b32 temp_param_reg;
-    .param .b64 param0;
-    st.param.b64 [param0+0], %rd1;
-    .param .b32 param1;
-    st.param.b32 [param1+0], %r2;
-    call.uni cudaGraphSetConditional, (param0, param1);
-    } // callseq 0
-    ret;
 }
 )PTX";
 
-CachedCudaGraph::~CachedCudaGraph() {
+CachedGraph::CachedGraph(std::size_t arg_buf_size,
+                         std::size_t result_buf_size,
+                         bool needs_counter_ptr_slot,
+                         LlvmRuntimeExecutor *executor)
+    : arg_buffer_size(arg_buf_size), result_buffer_size(result_buf_size) {
+  CUDADriver::get_instance().malloc(
+      (void **)&persistent_device_result_buffer,
+      std::max(result_buffer_size, sizeof(uint64)));
+
+  if (arg_buffer_size > 0) {
+    CUDADriver::get_instance().malloc((void **)&persistent_device_arg_buffer,
+                                      arg_buffer_size);
+  }
+
+  if (needs_counter_ptr_slot) {
+    CUDADriver::get_instance().malloc(&counter_ptr_slot, sizeof(void *));
+  }
+
+  persistent_ctx.runtime = executor->get_llvm_runtime();
+  persistent_ctx.arg_buffer = persistent_device_arg_buffer;
+  persistent_ctx.result_buffer = (uint64 *)persistent_device_result_buffer;
+  persistent_ctx.cpu_thread_id = 0;
+}
+
+CachedGraph::~CachedGraph() {
   if (graph_exec) {
     CUDADriver::get_instance().graph_exec_destroy(graph_exec);
   }
@@ -85,44 +109,40 @@ CachedCudaGraph::~CachedCudaGraph() {
   if (persistent_device_result_buffer) {
     CUDADriver::get_instance().mem_free(persistent_device_result_buffer);
   }
+  if (counter_ptr_slot) {
+    CUDADriver::get_instance().mem_free(counter_ptr_slot);
+  }
 }
 
-CachedCudaGraph::CachedCudaGraph(CachedCudaGraph &&other) noexcept
+CachedGraph::CachedGraph(CachedGraph &&other) noexcept
     : graph_exec(other.graph_exec),
       persistent_device_arg_buffer(other.persistent_device_arg_buffer),
       persistent_device_result_buffer(other.persistent_device_result_buffer),
       persistent_ctx(other.persistent_ctx),
       arg_buffer_size(other.arg_buffer_size),
       result_buffer_size(other.result_buffer_size),
-      graph_do_while_flag_dev_ptr(other.graph_do_while_flag_dev_ptr),
+      counter_ptr_slot(other.counter_ptr_slot),
       num_nodes(other.num_nodes) {
   other.graph_exec = nullptr;
   other.persistent_device_arg_buffer = nullptr;
   other.persistent_device_result_buffer = nullptr;
+  other.counter_ptr_slot = nullptr;
 }
 
-CachedCudaGraph &CachedCudaGraph::operator=(CachedCudaGraph &&other) noexcept {
-  if (this != &other) {
-    if (graph_exec)
-      CUDADriver::get_instance().graph_exec_destroy(graph_exec);
-    if (persistent_device_arg_buffer)
-      CUDADriver::get_instance().mem_free(persistent_device_arg_buffer);
-    if (persistent_device_result_buffer)
-      CUDADriver::get_instance().mem_free(persistent_device_result_buffer);
-
-    graph_exec = other.graph_exec;
-    persistent_device_arg_buffer = other.persistent_device_arg_buffer;
-    persistent_device_result_buffer = other.persistent_device_result_buffer;
-    persistent_ctx = other.persistent_ctx;
-    arg_buffer_size = other.arg_buffer_size;
-    result_buffer_size = other.result_buffer_size;
-    graph_do_while_flag_dev_ptr = other.graph_do_while_flag_dev_ptr;
-    num_nodes = other.num_nodes;
-
-    other.graph_exec = nullptr;
-    other.persistent_device_arg_buffer = nullptr;
-    other.persistent_device_result_buffer = nullptr;
-  }
+CachedGraph &CachedGraph::operator=(CachedGraph &&other) noexcept {
+  // Move-and-swap: after the swaps, `raii_guard` holds our old resources and
+  // its destructor frees them, so every owned pointer is released uniformly.
+  CachedGraph raii_guard(std::move(other));
+  std::swap(graph_exec, raii_guard.graph_exec);
+  std::swap(persistent_device_arg_buffer,
+            raii_guard.persistent_device_arg_buffer);
+  std::swap(persistent_device_result_buffer,
+            raii_guard.persistent_device_result_buffer);
+  std::swap(persistent_ctx, raii_guard.persistent_ctx);
+  std::swap(arg_buffer_size, raii_guard.arg_buffer_size);
+  std::swap(result_buffer_size, raii_guard.result_buffer_size);
+  std::swap(counter_ptr_slot, raii_guard.counter_ptr_slot);
+  std::swap(num_nodes, raii_guard.num_nodes);
   return *this;
 }
 
@@ -131,9 +151,9 @@ CachedCudaGraph &CachedCudaGraph::operator=(CachedCudaGraph &&other) noexcept {
 //
 // Unlike the normal launch path, this does not handle host-resident arrays
 // (no temporary device allocation or host-to-device transfer). Errors if
-// any external array is on the host, since cuda_graph requires all arrays
+// any external array is on the host, since graph requires all arrays
 // to be device-resident.
-void CudaGraphManager::resolve_ctx_ndarray_ptrs(
+void GraphManager::resolve_ctx_ndarray_ptrs(
     LaunchContextBuilder &ctx,
     const std::vector<std::pair<int, Callable::Parameter>> &parameters,
     LlvmRuntimeExecutor *executor) {
@@ -156,7 +176,7 @@ void CudaGraphManager::resolve_ctx_ndarray_ptrs(
       auto grad_ptr = ctx.array_ptrs[grad_ptr_idx];
 
       QD_ERROR_IF(grad_ptr != nullptr,
-                  "cuda_graph does not support autograd; "
+                  "graph does not support autograd; "
                   "ndarray arg {} has a non-null gradient pointer",
                   arg_id);
 
@@ -167,7 +187,7 @@ void CudaGraphManager::resolve_ctx_ndarray_ptrs(
       if (ctx.device_allocation_type[arg_id] ==
           LaunchContextBuilder::DevAllocType::kNone) {
         QD_ERROR_IF(!on_cuda_device(data_ptr),
-                    "cuda_graph requires all ndarrays to be device-resident; "
+                    "graph requires all ndarrays to be device-resident; "
                     "ndarray arg {} is host-resident",
                     arg_id);
         resolved_data = data_ptr;
@@ -190,15 +210,15 @@ void CudaGraphManager::resolve_ctx_ndarray_ptrs(
 // Links the PTX (kConditionKernelPTX) with libcudadevrt.a to produce a cubin,
 // then loads the _qd_graph_do_while_cond function for use in conditional
 // while nodes. Only called once; subsequent calls are no-ops.
-void CudaGraphManager::ensure_condition_kernel_loaded() {
+void GraphManager::ensure_condition_kernel_loaded() {
   if (cond_kernel_func_)
     return;
 
   int cc = CUDAContext::get_instance().get_compute_capability();
   if (cc < 90) {
-    QD_WARN(
-        "graph_do_while requires SM 9.0+ (Hopper), but this device is SM {}. "
-        "Falling back to non-graph path.",
+    QD_INFO(
+        "graph_do_while natively requires SM 9.0+, but this device is SM {}. "
+        "Falling back to host-side do-while loop.",
         cc);
     return;
   }
@@ -251,13 +271,20 @@ void CudaGraphManager::ensure_condition_kernel_loaded() {
            cubin_size);
 }
 
-void *CudaGraphManager::add_kernel_node(void *graph,
-                                        void *prev_node,
-                                        void *func,
-                                        unsigned int grid_dim,
-                                        unsigned int block_dim,
-                                        unsigned int shared_mem,
-                                        void **kernel_params) {
+void *GraphManager::add_kernel_node(void *graph,
+                                    void *prev_node,
+                                    void *func,
+                                    unsigned int grid_dim,
+                                    unsigned int block_dim,
+                                    unsigned int shared_mem,
+                                    void **kernel_params) {
+  // Opt-in to the requested dynamic shared memory size, just as
+  // CUDAContext::launch does for the non-graph path.
+  if (shared_mem > 0) {
+    CUDADriver::get_instance().kernel_set_attribute(
+        func, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, shared_mem);
+  }
+
   CudaKernelNodeParams params{};
   params.func = func;
   params.gridDimX = grid_dim;
@@ -277,7 +304,7 @@ void *CudaGraphManager::add_kernel_node(void *graph,
   return node;
 }
 
-void *CudaGraphManager::add_conditional_while_node(
+void *GraphManager::add_conditional_while_node(
     void *graph,
     unsigned long long *cond_handle_out) {
   ensure_condition_kernel_loaded();
@@ -290,7 +317,7 @@ void *CudaGraphManager::add_conditional_while_node(
       /*defaultLaunchValue=*/1,
       /*flags=CU_GRAPH_COND_ASSIGN_DEFAULT=*/1);
 
-  CudaGraphNodeParams cond_node_params{};
+  GraphNodeParams cond_node_params{};
   cond_node_params.type = 13;  // CU_GRAPH_NODE_TYPE_CONDITIONAL
   cond_node_params.handle = *cond_handle_out;
   cond_node_params.condType = 1;  // CU_GRAPH_COND_TYPE_WHILE
@@ -311,14 +338,16 @@ void *CudaGraphManager::add_conditional_while_node(
   return body_graphs[0];
 }
 
-bool CudaGraphManager::launch_cached_graph(CachedCudaGraph &cached,
-                                           LaunchContextBuilder &ctx,
-                                           bool use_graph_do_while) {
-  QD_ERROR_IF(
-      use_graph_do_while &&
-          cached.graph_do_while_flag_dev_ptr != ctx.graph_do_while_flag_dev_ptr,
-      "graph_do_while condition ndarray changed between calls. "
-      "Reuse the same ndarray for the condition parameter across calls.");
+bool GraphManager::launch_cached_graph(CachedGraph &cached,
+                                       LaunchContextBuilder &ctx,
+                                       bool use_graph_do_while) {
+  // TODO: these two memcpy_host_to_device calls could be async
+  // (cuMemcpyHtoDAsync) on the launch stream for better CPU-GPU overlap.
+  if (use_graph_do_while && cached.counter_ptr_slot) {
+    void *flag_ptr = ctx.graph_do_while_flag_dev_ptr;
+    CUDADriver::get_instance().memcpy_host_to_device(cached.counter_ptr_slot,
+                                                     &flag_ptr, sizeof(void *));
+  }
 
   if (ctx.arg_buffer_size > 0) {
     CUDADriver::get_instance().memcpy_host_to_device(
@@ -332,7 +361,7 @@ bool CudaGraphManager::launch_cached_graph(CachedCudaGraph &cached,
   return true;
 }
 
-bool CudaGraphManager::try_launch(
+bool GraphManager::try_launch(
     int launch_id,
     LaunchContextBuilder &ctx,
     JITModule *cuda_module,
@@ -346,8 +375,8 @@ bool CudaGraphManager::try_launch(
   const bool use_graph_do_while = ctx.graph_do_while_arg_id >= 0;
 
   QD_ERROR_IF(ctx.result_buffer_size > 0,
-              "cuda_graph=True is not supported for kernels with struct return "
-              "values; remove cuda_graph=True or avoid returning values");
+              "graph=True is not supported for kernels with struct return "
+              "values; remove graph=True or avoid returning values");
 
   resolve_ctx_ndarray_ptrs(ctx, parameters, executor);
 
@@ -358,29 +387,14 @@ bool CudaGraphManager::try_launch(
 
   CUDAContext::get_instance().make_current();
 
-  CachedCudaGraph cached;
+  CachedGraph cached(ctx.arg_buffer_size, ctx.result_buffer_size,
+                     use_graph_do_while, executor);
 
-  // --- Allocate persistent buffers ---
-  cached.result_buffer_size = std::max(ctx.result_buffer_size, sizeof(uint64));
-  CUDADriver::get_instance().malloc(
-      (void **)&cached.persistent_device_result_buffer,
-      cached.result_buffer_size);
-
-  cached.arg_buffer_size = ctx.arg_buffer_size;
   if (cached.arg_buffer_size > 0) {
-    CUDADriver::get_instance().malloc(
-        (void **)&cached.persistent_device_arg_buffer, cached.arg_buffer_size);
     CUDADriver::get_instance().memcpy_host_to_device(
         cached.persistent_device_arg_buffer, ctx.get_context().arg_buffer,
         cached.arg_buffer_size);
   }
-
-  // --- Build persistent RuntimeContext ---
-  cached.persistent_ctx.runtime = executor->get_llvm_runtime();
-  cached.persistent_ctx.arg_buffer = cached.persistent_device_arg_buffer;
-  cached.persistent_ctx.result_buffer =
-      (uint64 *)cached.persistent_device_result_buffer;
-  cached.persistent_ctx.cpu_thread_id = 0;
 
   // --- Build CUDA graph ---
   void *graph = nullptr;
@@ -407,8 +421,19 @@ bool CudaGraphManager::try_launch(
 
   if (use_graph_do_while) {
     ensure_condition_kernel_loaded();
-    QD_ERROR_IF(!cond_kernel_func_,
-                "Condition kernel not available; cannot build graph_do_while");
+    if (!cond_kernel_func_) {
+      int cc = CUDAContext::get_instance().get_compute_capability();
+      if (cc >= 90) {
+        // SM 9.0+ should always be able to load the condition kernel.
+        // Failing here means prerequisites are missing.
+        QD_ERROR(
+            "Condition kernel not available on SM {}; "
+            "cannot build graph_do_while",
+            cc);
+      }
+      // Pre-SM 9.0: fall back to host-side do-while loop.
+      return false;
+    }
     kernel_target_graph = add_conditional_while_node(graph, &cond_handle);
   }
 
@@ -424,8 +449,14 @@ bool CudaGraphManager::try_launch(
   if (use_graph_do_while) {
     QD_ASSERT(ctx.graph_do_while_flag_dev_ptr);
 
+    // Write the initial counter address into the persistent indirection slot
+    // (allocated by the constructor). The condition kernel reads through this
+    // slot, so swapping the counter ndarray later only requires updating it.
     void *flag_ptr = ctx.graph_do_while_flag_dev_ptr;
-    void *cond_args[2] = {&cond_handle, &flag_ptr};
+    CUDADriver::get_instance().memcpy_host_to_device(cached.counter_ptr_slot,
+                                                     &flag_ptr, sizeof(void *));
+
+    void *cond_args[2] = {&cond_handle, &cached.counter_ptr_slot};
 
     add_kernel_node(kernel_target_graph, prev_node, cond_kernel_func_, 1, 1, 0,
                     cond_args);
@@ -446,11 +477,8 @@ bool CudaGraphManager::try_launch(
            cached.num_nodes, launch_id,
            use_graph_do_while ? " (with graph_do_while)" : "");
 
-  if (use_graph_do_while) {
-    cached.graph_do_while_flag_dev_ptr = ctx.graph_do_while_flag_dev_ptr;
-  }
-
   num_nodes_on_last_call_ = cached.num_nodes;
+  ++total_builds_;
   cache_.emplace(launch_id, std::move(cached));
   used_on_last_call_ = true;
   return true;
