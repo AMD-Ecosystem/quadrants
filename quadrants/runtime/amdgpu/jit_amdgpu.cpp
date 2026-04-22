@@ -64,6 +64,32 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
     function_pass_manager_addrcast.run(*func);
   function_pass_manager_addrcast.doFinalization();
 
+  // Mark SNode tree accessor loads as !invariant.load before inlining.
+  // The SNode tree structure (root pointers, pointer-node children, dense
+  // element sizes) is set up during scene.build() and never modified during
+  // kernel execution.  After the O3 pipeline inlines these functions, the
+  // metadata is preserved on the inlined loads, enabling LICM to hoist
+  // redundant SNode pointer-chasing out of inner loops.
+  {
+    auto *md = llvm::MDNode::get(llvm_module->getContext(), {});
+    const char *invariant_fns[] = {
+        "LLVMRuntime_get_roots",
+        "Dense_lookup_element",
+        "Pointer_lookup_element",
+    };
+    for (const char *name : invariant_fns) {
+      if (auto *F = llvm_module->getFunction(name)) {
+        for (auto &BB : *F) {
+          for (auto &I : BB) {
+            if (auto *LI = llvm::dyn_cast<llvm::LoadInst>(&I)) {
+              LI->setMetadata(llvm::LLVMContext::MD_invariant_load, md);
+            }
+          }
+        }
+      }
+    }
+  }
+
   for (auto &F : *llvm_module) {
     // Match CUDA parity: jit_cuda.cpp:332-335 unconditionally applies
     // unsafe-fp-math to ALL functions via hardcoded kFTZDenorms=1.
