@@ -224,8 +224,22 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   }
   char *device_arg_buffer = nullptr;
   if (ctx.arg_buffer_size > 0) {
-    AMDGPUDriver::get_instance().malloc_async((void **)&device_arg_buffer,
-                                              ctx.arg_buffer_size, nullptr);
+    // Cached per-handle device_arg_buffer (Phase 2b). Same rationale as
+    // device_result_buffer above: skip per-launch malloc_async/mem_free_async,
+    // grow on demand. Stream-ordering safety: the H2D copy below is on the
+    // default stream, the kernel reads from it on the same stream, and the
+    // next launch's H2D is also on the default stream — all serialized.
+    if (launcher_ctx.device_arg_buffer_capacity < ctx.arg_buffer_size) {
+      if (launcher_ctx.device_arg_buffer != nullptr) {
+        AMDGPUDriver::get_instance().mem_free_async(
+            launcher_ctx.device_arg_buffer, nullptr);
+      }
+      AMDGPUDriver::get_instance().malloc_async(
+          (void **)&launcher_ctx.device_arg_buffer, ctx.arg_buffer_size,
+          nullptr);
+      launcher_ctx.device_arg_buffer_capacity = ctx.arg_buffer_size;
+    }
+    device_arg_buffer = launcher_ctx.device_arg_buffer;
     // Async H2D so the arg-buffer staging copy can overlap with the kernel
     // launch path / driver bookkeeping. Mirrors CUDA launcher behaviour.
     AMDGPUDriver::get_instance().memcpy_host_to_device_async(
@@ -241,9 +255,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     launch_offloaded_tasks(ctx, amdgpu_module, offloaded_tasks);
   }
   QD_TRACE("Launching kernel");
-  if (ctx.arg_buffer_size > 0) {
-    AMDGPUDriver::get_instance().mem_free_async(device_arg_buffer, nullptr);
-  }
+  // device_arg_buffer is cached in launcher_ctx; do not free per-launch
+  // (Phase 2b).
   if (ctx.result_buffer_size > 0) {
     // Async D2H so the result-buffer copy is enqueued behind the kernel
     // on the stream rather than blocking the host. The caller is expected to
