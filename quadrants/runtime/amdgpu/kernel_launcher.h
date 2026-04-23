@@ -17,10 +17,14 @@ class KernelLauncher : public LLVM::KernelLauncher {
     // Cached per-launch device scratch buffers. Reused across launches to
     // avoid per-launch hipMallocAsync/hipFreeAsync (which call into
     // __amd_rocclr_copyBuffer-adjacent CLR machinery and also imply implicit
-    // stream serialization). Lazily grown on demand; never shrunk; freed at
-    // process exit by the OS (we intentionally do not destroy them in a
-    // destructor because the AMDGPU context lifetime is tricky during
-    // interpreter shutdown).
+    // stream serialization). Lazily grown on demand; never shrunk;
+    // explicitly freed in ~KernelLauncher() so that gs.destroy() (which
+    // tears down ProgramImpl and thus the launcher unique_ptr) reclaims
+    // them while the AMDGPU context is still alive. If the user never calls
+    // destroy and the launcher reaches static destruction at process exit,
+    // the AMDGPU context may already be torn down — in that case the OS
+    // reclaims the device memory anyway and our destructor's mem_free_async
+    // calls become best-effort.
     char *device_result_buffer{nullptr};
     size_t device_result_buffer_capacity{0};
     char *device_arg_buffer{nullptr};
@@ -29,6 +33,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
  public:
   using Base::Base;
+  ~KernelLauncher() override;
 
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(

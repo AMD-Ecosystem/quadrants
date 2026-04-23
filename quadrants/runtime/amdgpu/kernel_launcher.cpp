@@ -278,9 +278,9 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   // (Phase 2a: per-handle scratch buffer caching). Intentionally NOT freed
   // here — that was the second of two per-launch __amd_rocclr_copyBuffer
   // touchpoints we want to eliminate. The buffer survives until the
-  // KernelLauncher (and its per-handle Context) is destroyed; OS reclaims at
-  // process exit since AMDGPU context teardown timing is unsafe for an
-  // explicit free in destructor.
+  // KernelLauncher (and its per-handle Context) is destroyed in
+  // ~KernelLauncher() (Phase 2d), which during the normal gs.destroy() flow
+  // runs while the AMDGPU context is still alive.
   if (transfers.size()) {
     // Sync once for the entire batch of external-array readbacks.
     AMDGPUDriver::get_instance().stream_synchronize(nullptr);
@@ -291,6 +291,38 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
           itr->second.first, (void *)device_ptrs[idx],
           ctx.array_runtime_sizes[arg_id]);
       executor->deallocate_memory_on_device(itr->second.second);
+    }
+  }
+}
+
+KernelLauncher::~KernelLauncher() {
+  // Free the per-handle cached device scratch buffers (allocated lazily in
+  // launch_llvm_kernel and reused across launches). For the normal
+  // gs.destroy() flow this runs while the AMDGPU context is still alive, so
+  // total GPU memory accounting after destroy() matches the pre-cache
+  // semantics — every byte we allocated is reclaimed before the user's
+  // teardown returns.
+  //
+  // For the "user never calls gs.destroy(), launcher reaches static
+  // destruction at process exit" path, the AMDGPU context may already be
+  // torn down. The mem_free_async calls below become best-effort in that
+  // case (the OS reclaims the device memory at process exit anyway). We
+  // intentionally do NOT try to be clever about checking context liveness
+  // here because (a) any check is racy by definition during static
+  // destruction and (b) the worst-case outcome is a benign error from HIP
+  // that gets silently dropped, which is fine for the at-exit case.
+  for (auto &ctx : contexts_) {
+    if (ctx.device_arg_buffer != nullptr) {
+      AMDGPUDriver::get_instance().mem_free_async(ctx.device_arg_buffer,
+                                                  nullptr);
+      ctx.device_arg_buffer = nullptr;
+      ctx.device_arg_buffer_capacity = 0;
+    }
+    if (ctx.device_result_buffer != nullptr) {
+      AMDGPUDriver::get_instance().mem_free_async(ctx.device_result_buffer,
+                                                  nullptr);
+      ctx.device_result_buffer = nullptr;
+      ctx.device_result_buffer_capacity = 0;
     }
   }
 }
