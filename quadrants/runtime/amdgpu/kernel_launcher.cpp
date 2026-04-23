@@ -129,28 +129,29 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       transfers;
   std::unordered_map<ArgArrayPtrKey, void *, ArgArrayPtrKeyHasher> device_ptrs;
 
-  // Cached per-handle device_result_buffer.
-  // Two roles:
-  //   1) Sink for executor->allocate_memory_on_device() output (8 bytes).
-  //   2) Device-side staging for ctx.result_buffer (variable size).
-  // Sized to max(result_buffer_size, sizeof(uint64)). Grow-on-demand; never
-  // freed per-launch. Implicit stream ordering on the default stream makes
-  // reuse safe: the previous launch's async D->H from this buffer is queued
-  // before any host read of host_result_buffer (which always happens behind a
-  // stream sync), and the next launch's enqueue serializes after that copy.
-  size_t needed_result_capacity =
-      std::max(ctx.result_buffer_size, sizeof(uint64));
-  if (launcher_ctx.device_result_buffer_capacity < needed_result_capacity) {
-    if (launcher_ctx.device_result_buffer != nullptr) {
-      AMDGPUDriver::get_instance().mem_free_async(
-          launcher_ctx.device_result_buffer, nullptr);
+  // Cached per-handle device_result_buffer (Phase 2a) with lazy initialisation
+  // (Phase 2c). Two roles:
+  //   1) Sink for executor->allocate_memory_on_device() output (8 bytes), but
+  //      only when a host-array transfer is needed inside the param loop.
+  //   2) Device-side staging for ctx.result_buffer (variable size), but only
+  //      when result_buffer_size > 0.
+  // For void kernels with no host->device transfers (the common case in the
+  // Genesis rigid-physics step loop), this whole code path is skipped — no
+  // hipMallocAsync, no hipFreeAsync, no hipMemcpyDtoHAsync — and the cached
+  // buffer for this handle stays untouched.
+  auto ensure_result_buffer = [&](size_t at_least) -> char * {
+    if (launcher_ctx.device_result_buffer_capacity < at_least) {
+      if (launcher_ctx.device_result_buffer != nullptr) {
+        AMDGPUDriver::get_instance().mem_free_async(
+            launcher_ctx.device_result_buffer, nullptr);
+      }
+      AMDGPUDriver::get_instance().malloc_async(
+          (void **)&launcher_ctx.device_result_buffer, at_least, nullptr);
+      launcher_ctx.device_result_buffer_capacity = at_least;
     }
-    AMDGPUDriver::get_instance().malloc_async(
-        (void **)&launcher_ctx.device_result_buffer, needed_result_capacity,
-        nullptr);
-    launcher_ctx.device_result_buffer_capacity = needed_result_capacity;
-  }
-  char *device_result_buffer = launcher_ctx.device_result_buffer;
+    return launcher_ctx.device_result_buffer;
+  };
+  char *device_result_buffer = nullptr;  // populated lazily below if needed
 
   for (int i = 0; i < (int)parameters.size(); i++) {
     const auto &kv = parameters[i];
@@ -182,6 +183,10 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
             branch_counts->kNone_host_copy.fetch_add(
                 1, std::memory_order_relaxed);
           }
+          // Lazy-ensure the cached scratch buffer; first transfer in the
+          // launch triggers the (one-time, cached) allocation.
+          if (device_result_buffer == nullptr)
+            device_result_buffer = ensure_result_buffer(sizeof(uint64));
           DeviceAllocation devalloc = executor->allocate_memory_on_device(
               arr_sz, (uint64 *)device_result_buffer);
           device_ptrs[data_ptr_idx] =
@@ -219,7 +224,10 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   }
   char *host_result_buffer = (char *)ctx.get_context().result_buffer;
   if (ctx.result_buffer_size > 0) {
-    // Malloc_Async and Free_Async are available after ROCm 5.4
+    // Lazy-ensure for the result-buffer role (sized to the larger of the two
+    // possible needs).
+    device_result_buffer = ensure_result_buffer(
+        std::max(ctx.result_buffer_size, sizeof(uint64)));
     ctx.get_context().result_buffer = (uint64 *)device_result_buffer;
   }
   char *device_arg_buffer = nullptr;
