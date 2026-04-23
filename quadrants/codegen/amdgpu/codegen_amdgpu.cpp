@@ -227,6 +227,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
 
       body = guard.body;
     }
+    tlctx->mark_inline(body);
 
     auto epilogue = create_xlogue(stmt->tls_epilogue);
 
