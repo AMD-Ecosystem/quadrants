@@ -13,6 +13,18 @@ class KernelLauncher : public LLVM::KernelLauncher {
     JITModule *jit_module{nullptr};
     const std::vector<std::pair<int, Callable::Parameter>> *parameters;
     std::vector<OffloadedTask> offloaded_tasks;
+
+    // Cached per-launch device scratch buffers. Reused across launches to
+    // avoid per-launch hipMallocAsync/hipFreeAsync (which call into
+    // __amd_rocclr_copyBuffer-adjacent CLR machinery and also imply implicit
+    // stream serialization). Lazily grown on demand; never shrunk; freed at
+    // process exit by the OS (we intentionally do not destroy them in a
+    // destructor because the AMDGPU context lifetime is tricky during
+    // interpreter shutdown).
+    char *device_result_buffer{nullptr};
+    size_t device_result_buffer_capacity{0};
+    char *device_arg_buffer{nullptr};
+    size_t device_arg_buffer_capacity{0};
   };
 
  public:

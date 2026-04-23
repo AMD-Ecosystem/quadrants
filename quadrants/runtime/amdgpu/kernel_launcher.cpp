@@ -105,7 +105,10 @@ bool KernelLauncher::on_amdgpu_device(void *ptr) {
 void KernelLauncher::launch_llvm_kernel(Handle handle,
                                         LaunchContextBuilder &ctx) {
   QD_ASSERT(handle.get_launch_id() < contexts_.size());
-  auto launcher_ctx = contexts_[handle.get_launch_id()];
+  // Take by reference so we can mutate cached scratch buffer fields
+  // (device_result_buffer / device_arg_buffer) and have them persist across
+  // launches.
+  auto &launcher_ctx = contexts_[handle.get_launch_id()];
   auto *executor = get_runtime_executor();
   auto *amdgpu_module = launcher_ctx.jit_module;
   const auto &parameters = *launcher_ctx.parameters;
@@ -126,10 +129,28 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       transfers;
   std::unordered_map<ArgArrayPtrKey, void *, ArgArrayPtrKeyHasher> device_ptrs;
 
-  char *device_result_buffer{nullptr};
-  AMDGPUDriver::get_instance().malloc_async(
-      (void **)&device_result_buffer,
-      std::max(ctx.result_buffer_size, sizeof(uint64)), nullptr);
+  // Cached per-handle device_result_buffer.
+  // Two roles:
+  //   1) Sink for executor->allocate_memory_on_device() output (8 bytes).
+  //   2) Device-side staging for ctx.result_buffer (variable size).
+  // Sized to max(result_buffer_size, sizeof(uint64)). Grow-on-demand; never
+  // freed per-launch. Implicit stream ordering on the default stream makes
+  // reuse safe: the previous launch's async D->H from this buffer is queued
+  // before any host read of host_result_buffer (which always happens behind a
+  // stream sync), and the next launch's enqueue serializes after that copy.
+  size_t needed_result_capacity =
+      std::max(ctx.result_buffer_size, sizeof(uint64));
+  if (launcher_ctx.device_result_buffer_capacity < needed_result_capacity) {
+    if (launcher_ctx.device_result_buffer != nullptr) {
+      AMDGPUDriver::get_instance().mem_free_async(
+          launcher_ctx.device_result_buffer, nullptr);
+    }
+    AMDGPUDriver::get_instance().malloc_async(
+        (void **)&launcher_ctx.device_result_buffer, needed_result_capacity,
+        nullptr);
+    launcher_ctx.device_result_buffer_capacity = needed_result_capacity;
+  }
+  char *device_result_buffer = launcher_ctx.device_result_buffer;
 
   for (int i = 0; i < (int)parameters.size(); i++) {
     const auto &kv = parameters[i];
@@ -232,9 +253,13 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
         host_result_buffer, device_result_buffer, ctx.result_buffer_size,
         nullptr);
   }
-  // Free the result buffer on the stream before the transfers-back sync,
-  // batching the free into the pipeline (matches CUDA launcher ordering).
-  AMDGPUDriver::get_instance().mem_free_async(device_result_buffer, nullptr);
+  // device_result_buffer is cached in launcher_ctx and reused across launches
+  // (Phase 2a: per-handle scratch buffer caching). Intentionally NOT freed
+  // here — that was the second of two per-launch __amd_rocclr_copyBuffer
+  // touchpoints we want to eliminate. The buffer survives until the
+  // KernelLauncher (and its per-handle Context) is destroyed; OS reclaims at
+  // process exit since AMDGPU context teardown timing is unsafe for an
+  // explicit free in destructor.
   if (transfers.size()) {
     // Sync once for the entire batch of external-array readbacks.
     AMDGPUDriver::get_instance().stream_synchronize(nullptr);
