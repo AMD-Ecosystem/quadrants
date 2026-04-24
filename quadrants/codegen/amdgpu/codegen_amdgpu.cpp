@@ -524,6 +524,16 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     }
   }
 
+
+  void visit(InternalFuncStmt *stmt) override {
+    if (stmt->func_name == "subgroupDppSwapPairs") {
+      llvm_val[stmt] = emit_amdgpu_dpp_swap_pairs(
+          llvm_val[stmt->args[0]], stmt->args[0]->ret_type);
+    } else {
+      TaskCodeGenLLVM::visit(stmt);
+    }
+  }
+
   void visit(BinaryOpStmt *stmt) override {
     auto op = stmt->op_type;
     auto ret_quadrants_type = stmt->ret_type;
@@ -565,6 +575,45 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
   }
 
  private:
+  llvm::Value *emit_amdgpu_dpp_swap_pairs(llvm::Value *value, DataType dt) {
+    auto *i32_ty = llvm::Type::getInt32Ty(*llvm_context);
+    auto *i1_ty = llvm::Type::getInt1Ty(*llvm_context);
+    auto *ctrl = llvm::ConstantInt::get(i32_ty, 0xB1);
+    auto *rmask = llvm::ConstantInt::get(i32_ty, 0xF);
+    auto *bmask = llvm::ConstantInt::get(i32_ty, 0xF);
+    auto *bctrl = llvm::ConstantInt::getFalse(i1_ty);
+
+    auto emit_dpp_32 = [&](llvm::Value *v) -> llvm::Value * {
+      auto *ty = v->getType();
+      return builder->CreateIntrinsic(
+          Intrinsic::amdgcn_update_dpp, {ty},
+          {llvm::Constant::getNullValue(ty), v, ctrl, rmask, bmask, bctrl});
+    };
+
+    if (dt->is_primitive(PrimitiveTypeID::i32) ||
+        dt->is_primitive(PrimitiveTypeID::u32) ||
+        dt->is_primitive(PrimitiveTypeID::f32)) {
+      return emit_dpp_32(value);
+    }
+    if (dt->is_primitive(PrimitiveTypeID::f64) ||
+        dt->is_primitive(PrimitiveTypeID::i64) ||
+        dt->is_primitive(PrimitiveTypeID::u64)) {
+      auto *i64_ty = llvm::Type::getInt64Ty(*llvm_context);
+      auto *i64_val = builder->CreateBitCast(value, i64_ty);
+      auto *lo = builder->CreateTrunc(i64_val, i32_ty);
+      auto *hi = builder->CreateTrunc(builder->CreateLShr(i64_val, 32), i32_ty);
+      lo = emit_dpp_32(lo);
+      hi = emit_dpp_32(hi);
+      auto *result = builder->CreateOr(
+          builder->CreateZExt(lo, i64_ty),
+          builder->CreateShl(builder->CreateZExt(hi, i64_ty), 32));
+      return builder->CreateBitCast(result, value->getType());
+    }
+    QD_ERROR("subgroupDppSwapPairs: unsupported type {} on AMDGPU",
+             data_type_name(dt));
+    return nullptr;
+  }
+
   std::tuple<llvm::Value *, llvm::Value *> get_spmd_info() override {
     auto thread_idx = builder->CreateIntrinsic(Intrinsic::amdgcn_workitem_id_x,
                                                ArrayRef<llvm::Value *>{});
