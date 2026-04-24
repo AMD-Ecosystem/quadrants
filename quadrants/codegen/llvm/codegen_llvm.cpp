@@ -2446,6 +2446,15 @@ void TaskCodeGenLLVM::visit(ClearListStmt *stmt) {
 }
 
 void TaskCodeGenLLVM::visit(InternalFuncStmt *stmt) {
+  if (stmt->func_name == "subgroupDppSwapPairs") {
+    QD_ERROR("Internal op \"{}\" requires a GPU backend (AMDGPU or CUDA). "
+             "Wrap the call site with a backend guard such as "
+             "qd.static(backend == gs.amdgpu) so the CPU path never reaches "
+             "it.",
+             stmt->func_name);
+    return;
+  }
+
   std::vector<llvm::Value *> args;
 
   if (stmt->with_runtime_context)
