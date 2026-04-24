@@ -97,7 +97,7 @@ def test_super_long_line():
     msg = f"""
 File "{file}", line {lineno + 5}, in foo:
             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbaaaaaa
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 bbbbbbbbbbbbbbbbbbbbbaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(111)
@@ -122,7 +122,7 @@ def test_exception_in_node_with_body():
     lineno = frameinfo.lineno
     file = frameinfo.filename
     msg = f"""
-File "{file}", line {lineno + 3}, in foo:
+File "{file}", line {lineno + 4}, in foo:
         for i in range():
         ^^^^^^^^^^^^^^^^^
 Range should have 1, 2, or 3 arguments, found 0"""
