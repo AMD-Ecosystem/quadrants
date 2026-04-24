@@ -195,9 +195,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       }
     }
   }
-  if (transfers.size() > 0) {
-    AMDGPUDriver::get_instance().stream_synchronize(nullptr);
-  }
+  // No pre-kernel sync needed: transfer H2Ds above are synchronous, and
+  // the arg-buffer async H2D below is stream-ordered with the kernel.
   char *host_result_buffer = (char *)ctx.get_context().result_buffer;
   if (ctx.result_buffer_size > 0) {
     device_result_buffer = launcher_ctx.device_result_buffer.ensure(std::max(ctx.result_buffer_size, sizeof(uint64)));
@@ -219,12 +218,17 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     launch_offloaded_tasks(ctx, amdgpu_module, offloaded_tasks);
   }
   QD_TRACE("Launching kernel");
+  bool needs_sync = false;
   if (ctx.result_buffer_size > 0) {
     AMDGPUDriver::get_instance().memcpy_device_to_host_async(
         host_result_buffer, device_result_buffer, ctx.result_buffer_size,
         nullptr);
+    // Caller reads result_buffer via get_ret() with no further sync;
+    // hipMemcpyDtoHAsync may return before the host sees the copy, so
+    // force a sync below regardless of pageable/pinned destination.
+    needs_sync = true;
   }
-  if (transfers.size()) {
+  if (!transfers.empty() || needs_sync) {
     AMDGPUDriver::get_instance().stream_synchronize(nullptr);
     for (auto itr = transfers.begin(); itr != transfers.end(); itr++) {
       auto &idx = itr->first;
