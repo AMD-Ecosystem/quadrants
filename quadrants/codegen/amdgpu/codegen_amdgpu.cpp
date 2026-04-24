@@ -72,8 +72,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       auto base = new llvm::GlobalVariable(
           *module, type, false, llvm::GlobalValue::ExternalLinkage, nullptr,
           fmt::format("shared_array_t{}_s{}", task_codegen_id, stmt->id),
-          nullptr, llvm::GlobalVariable::NotThreadLocal,
-          3 /*addrspace=LDS*/);
+          nullptr, llvm::GlobalVariable::NotThreadLocal, 3 /*addrspace=LDS*/);
       base->setAlignment(llvm::MaybeAlign(8));
       auto ptr_type = llvm::PointerType::get(type, 0);
       llvm_val[stmt] = builder->CreatePointerCast(base, ptr_type);
@@ -314,8 +313,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     if (input && input->getType()->isPointerTy() &&
         input->getType()->getPointerAddressSpace() == 1) {
       auto *ptr_as0 = llvm::PointerType::getUnqual(*llvm_context);
-      llvm_val[stmt->input_ptr] =
-          builder->CreateAddrSpaceCast(input, ptr_as0);
+      llvm_val[stmt->input_ptr] = builder->CreateAddrSpaceCast(input, ptr_as0);
     }
     TaskCodeGenLLVM::visit(stmt);
     llvm_val[stmt->input_ptr] = input;
@@ -368,16 +366,15 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
           tlctx->get_data_type(stmt->origin->ret_type.ptr_removed());
       auto *casted_ptr = builder->CreateBitCast(
           origin_ptr, llvm::PointerType::get(origin_pointee_ty, origin_as));
-      llvm_val[stmt] = builder->CreateGEP(
-          origin_pointee_ty, casted_ptr,
-          {tlctx->get_constant(0), llvm_val[stmt->offset]});
+      llvm_val[stmt] =
+          builder->CreateGEP(origin_pointee_ty, casted_ptr,
+                             {tlctx->get_constant(0), llvm_val[stmt->offset]});
     } else {
       auto *origin_address = builder->CreatePtrToInt(
           origin_ptr, llvm::Type::getInt64Ty(*llvm_context));
       auto *address_offset = builder->CreateSExt(
           llvm_val[stmt->offset], llvm::Type::getInt64Ty(*llvm_context));
-      auto *target_address =
-          builder->CreateAdd(origin_address, address_offset);
+      auto *target_address = builder->CreateAdd(origin_address, address_offset);
       auto pointee_ty = tlctx->get_data_type(stmt->ret_type.ptr_removed());
       llvm_val[stmt] = builder->CreateIntToPtr(
           target_address, llvm::PointerType::get(pointee_ty, origin_as));
@@ -443,8 +440,8 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
 
   // BLS / shared memory buffer allocation
   void create_bls_buffer(OffloadedStmt *stmt) {
-    auto type = llvm::ArrayType::get(
-        llvm::Type::getInt8Ty(*llvm_context), stmt->bls_size);
+    auto type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*llvm_context),
+                                     stmt->bls_size);
     bls_buffer = new llvm::GlobalVariable(
         *module, type, false, llvm::GlobalValue::ExternalLinkage, nullptr,
         "bls_buffer", nullptr, llvm::GlobalVariable::NotThreadLocal,
@@ -524,6 +521,15 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     }
   }
 
+  void visit(InternalFuncStmt *stmt) override {
+    if (stmt->func_name == "subgroupDppSwapPairs") {
+      llvm_val[stmt] = emit_amdgpu_dpp_swap_pairs(llvm_val[stmt->args[0]],
+                                                  stmt->args[0]->ret_type);
+    } else {
+      TaskCodeGenLLVM::visit(stmt);
+    }
+  }
+
   void visit(BinaryOpStmt *stmt) override {
     auto op = stmt->op_type;
     auto ret_quadrants_type = stmt->ret_type;
@@ -565,6 +571,45 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
   }
 
  private:
+  llvm::Value *emit_amdgpu_dpp_swap_pairs(llvm::Value *value, DataType dt) {
+    auto *i32_ty = llvm::Type::getInt32Ty(*llvm_context);
+    auto *i1_ty = llvm::Type::getInt1Ty(*llvm_context);
+    auto *ctrl = llvm::ConstantInt::get(i32_ty, 0xB1);
+    auto *rmask = llvm::ConstantInt::get(i32_ty, 0xF);
+    auto *bmask = llvm::ConstantInt::get(i32_ty, 0xF);
+    auto *bctrl = llvm::ConstantInt::getFalse(i1_ty);
+
+    auto emit_dpp_32 = [&](llvm::Value *v) -> llvm::Value * {
+      auto *ty = v->getType();
+      return builder->CreateIntrinsic(
+          Intrinsic::amdgcn_update_dpp, {ty},
+          {llvm::Constant::getNullValue(ty), v, ctrl, rmask, bmask, bctrl});
+    };
+
+    if (dt->is_primitive(PrimitiveTypeID::i32) ||
+        dt->is_primitive(PrimitiveTypeID::u32) ||
+        dt->is_primitive(PrimitiveTypeID::f32)) {
+      return emit_dpp_32(value);
+    }
+    if (dt->is_primitive(PrimitiveTypeID::f64) ||
+        dt->is_primitive(PrimitiveTypeID::i64) ||
+        dt->is_primitive(PrimitiveTypeID::u64)) {
+      auto *i64_ty = llvm::Type::getInt64Ty(*llvm_context);
+      auto *i64_val = builder->CreateBitCast(value, i64_ty);
+      auto *lo = builder->CreateTrunc(i64_val, i32_ty);
+      auto *hi = builder->CreateTrunc(builder->CreateLShr(i64_val, 32), i32_ty);
+      lo = emit_dpp_32(lo);
+      hi = emit_dpp_32(hi);
+      auto *result = builder->CreateOr(
+          builder->CreateZExt(lo, i64_ty),
+          builder->CreateShl(builder->CreateZExt(hi, i64_ty), 32));
+      return builder->CreateBitCast(result, value->getType());
+    }
+    QD_ERROR("subgroupDppSwapPairs: unsupported type {} on AMDGPU",
+             data_type_name(dt));
+    return nullptr;
+  }
+
   std::tuple<llvm::Value *, llvm::Value *> get_spmd_info() override {
     auto thread_idx = builder->CreateIntrinsic(Intrinsic::amdgcn_workitem_id_x,
                                                ArrayRef<llvm::Value *>{});

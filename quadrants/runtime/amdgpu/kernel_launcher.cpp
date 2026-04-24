@@ -74,8 +74,8 @@ void KernelLauncher::launch_offloaded_tasks(
     QD_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
              task.block_dim);
     amdgpu_module->launch(task.name, task.grid_dim, task.block_dim,
-                          task.dynamic_shared_array_bytes,
-                          {&ctx.get_context()}, {kRuntimeContextArgSize});
+                          task.dynamic_shared_array_bytes, {&ctx.get_context()},
+                          {kRuntimeContextArgSize});
   }
 }
 
@@ -152,14 +152,14 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
           LaunchContextBuilder::DevAllocType::kNone) {
         if (on_amdgpu_device(data_ptr)) {
           if (branch_counts) {
-            branch_counts->kNone_on_device.fetch_add(
-                1, std::memory_order_relaxed);
+            branch_counts->kNone_on_device.fetch_add(1,
+                                                     std::memory_order_relaxed);
           }
           device_ptrs[data_ptr_idx] = data_ptr;
         } else {
           if (branch_counts) {
-            branch_counts->kNone_host_copy.fetch_add(
-                1, std::memory_order_relaxed);
+            branch_counts->kNone_host_copy.fetch_add(1,
+                                                     std::memory_order_relaxed);
           }
           DeviceAllocation devalloc = executor->allocate_memory_on_device(
               arr_sz, (uint64 *)device_result_buffer);
