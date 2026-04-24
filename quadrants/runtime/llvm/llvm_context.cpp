@@ -1142,8 +1142,8 @@ void QuadrantsLLVMContext::mark_function_as_cuda_kernel(llvm::Function *func,
   }
 }
 
-void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(
-    llvm::Function *func, int block_dim) {
+void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(llvm::Function *func,
+                                                          int block_dim) {
   func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
   if (block_dim > 0) {
     // Note: hardcoded wavefront size of 64 matches CDNA3. RDNA in wave32
@@ -1152,8 +1152,8 @@ void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(
     constexpr int kAmdgpuWavefrontSize = 64;
     int min_block_dim = std::max(block_dim, kAmdgpuWavefrontSize);
     int max_block_dim = std::max(block_dim, kAmdgpuWavefrontSize);
-    std::string size_str = std::to_string(min_block_dim) + "," +
-                           std::to_string(max_block_dim);
+    std::string size_str =
+        std::to_string(min_block_dim) + "," + std::to_string(max_block_dim);
     func->addFnAttr("amdgpu-flat-work-group-size", size_str);
   }
 }
