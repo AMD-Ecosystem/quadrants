@@ -205,8 +205,11 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   if (ctx.arg_buffer_size > 0) {
     AMDGPUDriver::get_instance().malloc_async((void **)&device_arg_buffer,
                                               ctx.arg_buffer_size, nullptr);
-    AMDGPUDriver::get_instance().memcpy_host_to_device(
-        device_arg_buffer, ctx.get_context().arg_buffer, ctx.arg_buffer_size);
+    // Async H2D so the arg-buffer staging copy can overlap with the kernel
+    // launch path / driver bookkeeping. Mirrors CUDA launcher behaviour.
+    AMDGPUDriver::get_instance().memcpy_host_to_device_async(
+        device_arg_buffer, ctx.get_context().arg_buffer, ctx.arg_buffer_size,
+        nullptr);
     ctx.get_context().arg_buffer = device_arg_buffer;
   }
 
@@ -221,10 +224,20 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     AMDGPUDriver::get_instance().mem_free_async(device_arg_buffer, nullptr);
   }
   if (ctx.result_buffer_size > 0) {
-    AMDGPUDriver::get_instance().memcpy_device_to_host(
-        host_result_buffer, device_result_buffer, ctx.result_buffer_size);
+    // Async D2H so the result-buffer copy is enqueued behind the kernel
+    // on the stream rather than blocking the host. The caller is expected to
+    // synchronize before reading host_result_buffer (or rely on the implicit
+    // ordering on the default stream when the next op is enqueued).
+    AMDGPUDriver::get_instance().memcpy_device_to_host_async(
+        host_result_buffer, device_result_buffer, ctx.result_buffer_size,
+        nullptr);
   }
+  // Free the result buffer on the stream before the transfers-back sync,
+  // batching the free into the pipeline (matches CUDA launcher ordering).
+  AMDGPUDriver::get_instance().mem_free_async(device_result_buffer, nullptr);
   if (transfers.size()) {
+    // Sync once for the entire batch of external-array readbacks.
+    AMDGPUDriver::get_instance().stream_synchronize(nullptr);
     for (auto itr = transfers.begin(); itr != transfers.end(); itr++) {
       auto &idx = itr->first;
       auto arg_id = idx.arg_id;
@@ -234,7 +247,6 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       executor->deallocate_memory_on_device(itr->second.second);
     }
   }
-  AMDGPUDriver::get_instance().mem_free_async(device_result_buffer, nullptr);
 }
 
 KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
