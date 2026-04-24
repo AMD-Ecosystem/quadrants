@@ -72,8 +72,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       auto base = new llvm::GlobalVariable(
           *module, type, false, llvm::GlobalValue::ExternalLinkage, nullptr,
           fmt::format("shared_array_t{}_s{}", task_codegen_id, stmt->id),
-          nullptr, llvm::GlobalVariable::NotThreadLocal,
-          3 /*addrspace=LDS*/);
+          nullptr, llvm::GlobalVariable::NotThreadLocal, 3 /*addrspace=LDS*/);
       base->setAlignment(llvm::MaybeAlign(8));
       auto ptr_type = llvm::PointerType::get(type, 0);
       llvm_val[stmt] = builder->CreatePointerCast(base, ptr_type);
@@ -314,8 +313,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     if (input && input->getType()->isPointerTy() &&
         input->getType()->getPointerAddressSpace() == 1) {
       auto *ptr_as0 = llvm::PointerType::getUnqual(*llvm_context);
-      llvm_val[stmt->input_ptr] =
-          builder->CreateAddrSpaceCast(input, ptr_as0);
+      llvm_val[stmt->input_ptr] = builder->CreateAddrSpaceCast(input, ptr_as0);
     }
     TaskCodeGenLLVM::visit(stmt);
     llvm_val[stmt->input_ptr] = input;
@@ -368,16 +366,15 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
           tlctx->get_data_type(stmt->origin->ret_type.ptr_removed());
       auto *casted_ptr = builder->CreateBitCast(
           origin_ptr, llvm::PointerType::get(origin_pointee_ty, origin_as));
-      llvm_val[stmt] = builder->CreateGEP(
-          origin_pointee_ty, casted_ptr,
-          {tlctx->get_constant(0), llvm_val[stmt->offset]});
+      llvm_val[stmt] =
+          builder->CreateGEP(origin_pointee_ty, casted_ptr,
+                             {tlctx->get_constant(0), llvm_val[stmt->offset]});
     } else {
       auto *origin_address = builder->CreatePtrToInt(
           origin_ptr, llvm::Type::getInt64Ty(*llvm_context));
       auto *address_offset = builder->CreateSExt(
           llvm_val[stmt->offset], llvm::Type::getInt64Ty(*llvm_context));
-      auto *target_address =
-          builder->CreateAdd(origin_address, address_offset);
+      auto *target_address = builder->CreateAdd(origin_address, address_offset);
       auto pointee_ty = tlctx->get_data_type(stmt->ret_type.ptr_removed());
       llvm_val[stmt] = builder->CreateIntToPtr(
           target_address, llvm::PointerType::get(pointee_ty, origin_as));
@@ -443,8 +440,8 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
 
   // BLS / shared memory buffer allocation
   void create_bls_buffer(OffloadedStmt *stmt) {
-    auto type = llvm::ArrayType::get(
-        llvm::Type::getInt8Ty(*llvm_context), stmt->bls_size);
+    auto type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*llvm_context),
+                                     stmt->bls_size);
     bls_buffer = new llvm::GlobalVariable(
         *module, type, false, llvm::GlobalValue::ExternalLinkage, nullptr,
         "bls_buffer", nullptr, llvm::GlobalVariable::NotThreadLocal,
@@ -524,11 +521,10 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     }
   }
 
-
   void visit(InternalFuncStmt *stmt) override {
     if (stmt->func_name == "subgroupDppSwapPairs") {
-      llvm_val[stmt] = emit_amdgpu_dpp_swap_pairs(
-          llvm_val[stmt->args[0]], stmt->args[0]->ret_type);
+      llvm_val[stmt] = emit_amdgpu_dpp_swap_pairs(llvm_val[stmt->args[0]],
+                                                  stmt->args[0]->ret_type);
     } else {
       TaskCodeGenLLVM::visit(stmt);
     }

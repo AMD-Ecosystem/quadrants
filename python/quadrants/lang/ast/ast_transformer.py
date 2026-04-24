@@ -970,8 +970,7 @@ class ASTTransformer(Builder):
 
             with ctx.loop_scope_guard():
                 stmt_dbg_info = _qd_core.DebugInfo(ctx.get_pos_info(node))
-                ctx.ast_builder.begin_frontend_while(
-                    expr.Expr(1, dtype=primitive_types.i32).ptr, stmt_dbg_info)
+                ctx.ast_builder.begin_frontend_while(expr.Expr(1, dtype=primitive_types.i32).ptr, stmt_dbg_info)
 
                 cond = loop_var < end
                 impl.begin_frontend_if(ctx.ast_builder, cond, stmt_dbg_info)
