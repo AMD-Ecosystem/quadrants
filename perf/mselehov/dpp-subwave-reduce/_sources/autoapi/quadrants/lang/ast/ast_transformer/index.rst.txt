@@ -299,6 +299,22 @@ Module Contents
 
 
 
+   .. py:method:: build_strided_range_for(ctx, node)
+      :staticmethod:
+
+
+      Desugar `for i in range(start, stop, step)` into a while loop.
+
+      The Quadrants IR does not natively support a step parameter in
+      range-for loops.  We lower `range(start, stop, step)` into::
+
+          i = start
+          while i < stop:   # (or i > stop when step < 0)
+              <body>
+              i = i + step
+
+
+
    .. py:method:: build_ndrange_for(ctx: quadrants.lang.ast.ast_transformer_utils.ASTTransformerFuncContext, node: ast.For) -> None
       :staticmethod:
 

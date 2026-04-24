@@ -670,6 +670,20 @@ See also: <a class="reference external" href="https://docs.python.org/3/library/
 <dd></dd></dl>
 
 <dl class="py method">
+<dt class="sig sig-object py" id="quadrants.lang.ast.ast_transformer.ASTTransformer.build_strided_range_for">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">build_strided_range_for</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ctx</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">node</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/quadrants/lang/ast/ast_transformer.html#ASTTransformer.build_strided_range_for"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#quadrants.lang.ast.ast_transformer.ASTTransformer.build_strided_range_for" title="Link to this definition">#</a></dt>
+<dd><p>Desugar <cite>for i in range(start, stop, step)</cite> into a while loop.</p>
+<p>The Quadrants IR does not natively support a step parameter in
+range-for loops.  We lower <cite>range(start, stop, step)</cite> into:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">i</span> <span class="o">=</span> <span class="n">start</span>
+<span class="k">while</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">stop</span><span class="p">:</span>   <span class="c1"># (or i &gt; stop when step &lt; 0)</span>
+    <span class="o">&lt;</span><span class="n">body</span><span class="o">&gt;</span>
+    <span class="n">i</span> <span class="o">=</span> <span class="n">i</span> <span class="o">+</span> <span class="n">step</span>
+</pre></div>
+</div>
+</dd></dl>
+
+<dl class="py method">
 <dt class="sig sig-object py" id="quadrants.lang.ast.ast_transformer.ASTTransformer.build_ndrange_for">
 <em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">build_ndrange_for</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">ctx</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference internal" href="../ast_transformer_utils/index.html#quadrants.lang.ast.ast_transformer_utils.ASTTransformerFuncContext" title="quadrants.lang.ast.ast_transformer_utils.ASTTransformerFuncContext"><span class="pre">quadrants.lang.ast.ast_transformer_utils.ASTTransformerFuncContext</span></a></span></em>, <em class="sig-param"><span class="n"><span class="pre">node</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">ast.For</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">None</span></span></span><a class="reference internal" href="../../../../../_modules/quadrants/lang/ast/ast_transformer.html#ASTTransformer.build_ndrange_for"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#quadrants.lang.ast.ast_transformer.ASTTransformer.build_ndrange_for" title="Link to this definition">#</a></dt>
 <dd></dd></dl>
@@ -857,6 +871,7 @@ See also: <a class="reference external" href="https://docs.python.org/3/library/
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.ast.ast_transformer.ASTTransformer.get_for_loop_targets"><code class="docutils literal notranslate"><span class="pre">ASTTransformer.get_for_loop_targets()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.ast.ast_transformer.ASTTransformer.build_static_for"><code class="docutils literal notranslate"><span class="pre">ASTTransformer.build_static_for()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.ast.ast_transformer.ASTTransformer.build_range_for"><code class="docutils literal notranslate"><span class="pre">ASTTransformer.build_range_for()</span></code></a></li>
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.ast.ast_transformer.ASTTransformer.build_strided_range_for"><code class="docutils literal notranslate"><span class="pre">ASTTransformer.build_strided_range_for()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.ast.ast_transformer.ASTTransformer.build_ndrange_for"><code class="docutils literal notranslate"><span class="pre">ASTTransformer.build_ndrange_for()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.ast.ast_transformer.ASTTransformer.build_grouped_ndrange_for"><code class="docutils literal notranslate"><span class="pre">ASTTransformer.build_grouped_ndrange_for()</span></code></a></li>
 <li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.ast.ast_transformer.ASTTransformer.build_struct_for"><code class="docutils literal notranslate"><span class="pre">ASTTransformer.build_struct_for()</span></code></a></li>
