@@ -97,7 +97,7 @@ def test_super_long_line():
     msg = f"""
 File "{file}", line {lineno + 5}, in foo:
             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbaaaaaa
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 bbbbbbbbbbbbbbbbbbbbbaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(111)
@@ -108,9 +108,10 @@ bbbbbbbbbbbbbbbbbbbbbaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(111)
 @test_utils.test(print_full_traceback=False)
 def test_exception_in_node_with_body():
     frameinfo = getframeinfo(currentframe())
+
     @qd.kernel
     def foo():
-        for i in range(1, 2, 3):
+        for i in range():
             a = 1
             b = 1
             c = 1
@@ -122,8 +123,7 @@ def test_exception_in_node_with_body():
     file = frameinfo.filename
     msg = f"""
 File "{file}", line {lineno + 3}, in foo:
-        for i in range(1, 2, 3):
-        ^^^^^^^^^^^^^^^^^^^^^^^^
-Range should have 1 or 2 arguments, found 3"""
+        for i in range():
+        ^^^^^^^^^^^^^^^^^
+Range should have 1, 2, or 3 arguments, found 0"""
     assert msg in e.value.args[0]
-
