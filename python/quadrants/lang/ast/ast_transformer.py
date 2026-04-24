@@ -905,13 +905,15 @@ class ASTTransformer(Builder):
 
     @staticmethod
     def build_range_for(ctx: ASTTransformerFuncContext, node: ast.For) -> None:
+        if len(node.iter.args) not in [1, 2, 3]:
+            raise QuadrantsSyntaxError(f"Range should have 1, 2, or 3 arguments, found {len(node.iter.args)}")
+        if len(node.iter.args) == 3:
+            return ASTTransformer.build_strided_range_for(ctx, node)
         with ctx.variable_scope_guard():
             loop_name = node.target.id
             ctx.check_loop_var(loop_name)
             loop_var = expr.Expr(ctx.ast_builder.make_id_expr(""))
             ctx.create_variable(loop_name, loop_var)
-            if len(node.iter.args) not in [1, 2]:
-                raise QuadrantsSyntaxError(f"Range should have 1 or 2 arguments, found {len(node.iter.args)}")
             if len(node.iter.args) == 2:
                 begin_expr = expr.Expr(build_stmt(ctx, node.iter.args[0]))
                 end_expr = expr.Expr(build_stmt(ctx, node.iter.args[1]))
@@ -938,6 +940,51 @@ class ASTTransformer(Builder):
             build_stmts(ctx, node.body)
             ctx.loop_depth -= 1
             ctx.ast_builder.end_frontend_range_for()
+        return None
+
+    @staticmethod
+    def build_strided_range_for(ctx, node):
+        """Desugar `for i in range(start, stop, step)` into a while loop.
+
+        The Quadrants IR does not natively support a step parameter in
+        range-for loops.  We lower `range(start, stop, step)` into::
+
+            i = start
+            while i < stop:   # (or i > stop when step < 0)
+                <body>
+                i = i + step
+        """
+        with ctx.variable_scope_guard():
+            loop_name = node.target.id
+
+            begin_expr = expr.Expr(build_stmt(ctx, node.iter.args[0]))
+            end_expr = expr.Expr(build_stmt(ctx, node.iter.args[1]))
+            step_expr = expr.Expr(build_stmt(ctx, node.iter.args[2]))
+
+            begin = qd_ops.cast(begin_expr, primitive_types.i32)
+            end = qd_ops.cast(end_expr, primitive_types.i32)
+            step = qd_ops.cast(step_expr, primitive_types.i32)
+
+            loop_var = impl.expr_init(begin)
+            ctx.create_variable(loop_name, loop_var)
+
+            with ctx.loop_scope_guard():
+                stmt_dbg_info = _qd_core.DebugInfo(ctx.get_pos_info(node))
+                ctx.ast_builder.begin_frontend_while(
+                    expr.Expr(1, dtype=primitive_types.i32).ptr, stmt_dbg_info)
+
+                cond = loop_var < end
+                impl.begin_frontend_if(ctx.ast_builder, cond, stmt_dbg_info)
+                ctx.ast_builder.begin_frontend_if_true()
+                ctx.ast_builder.pop_scope()
+                ctx.ast_builder.begin_frontend_if_false()
+                ctx.ast_builder.insert_break_stmt(stmt_dbg_info)
+                ctx.ast_builder.pop_scope()
+
+                build_stmts(ctx, node.body)
+
+                loop_var._assign(loop_var + step)
+                ctx.ast_builder.pop_scope()
         return None
 
     @staticmethod
