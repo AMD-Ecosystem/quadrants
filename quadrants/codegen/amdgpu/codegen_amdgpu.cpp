@@ -228,6 +228,14 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       body = guard.body;
     }
 
+    // ``stmt->force_inline`` is set via ``qd.loop_config(force_inline=...)``
+    // at the frontend:
+    //    +1 -> force inline
+    //     0 (default) or -1 -> do not inline; LLVM decides on its own
+    if (body && stmt->force_inline > 0) {
+      tlctx->mark_inline(body);
+    }
+
     auto epilogue = create_xlogue(stmt->tls_epilogue);
 
     auto [begin, end] = get_range_for_bounds(stmt);
