@@ -1,5 +1,7 @@
 #include "quadrants/codegen/amdgpu/codegen_amdgpu.h"
 
+#include "llvm/IR/IntrinsicsAMDGPU.h"
+
 #include <vector>
 #include <set>
 #include <functional>
@@ -17,6 +19,7 @@
 #include "quadrants/ir/analysis.h"
 #include "quadrants/ir/transforms.h"
 #include "quadrants/codegen/codegen_utils.h"
+#include "quadrants/codegen/llvm/atomic_ordering.h"
 #include "quadrants/inc/constants.h"
 
 namespace quadrants {
@@ -163,11 +166,100 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
   // requires an addrspace cast + inlining for correctness, which causes
   // compilation blowup. Direct atomics preserve the address space and
   // compile fast.
+
+  // Emit a wave64 butterfly reduction (via ds_bpermute) followed by a
+  // single global atomicrmw from lane 0. Stacks on top of the existing
+  // direct-atomic optimized_reduction path: when applicable (fp32-add,
+  // i32-add) it collapses 64 contended global atomics down to 1 by
+  // shuffling partial sums across the wave with ds_bpermute. Inactive
+  // lanes contribute identity via amdgcn.set.inactive so partial waves
+  // still compute the right sum.
+  //
+  // Only the most common reduction shapes are emitted directly here;
+  // everything else (i32 min/max/and/or/xor, f32 min/max) falls through
+  // to the existing per-lane atomicrmw path below.
+  llvm::Value *try_emit_wave64_reduction(AtomicOpStmt *stmt) {
+    PrimitiveTypeID prim_type =
+        stmt->val->ret_type->cast<PrimitiveType>()->type;
+    AtomicOpType op = stmt->op_type;
+
+    llvm::AtomicRMWInst::BinOp atomic_op;
+    llvm::Type *val_ty = nullptr;
+    llvm::Constant *identity = nullptr;
+    std::function<llvm::Value *(llvm::Value *, llvm::Value *)> binop;
+
+    if (prim_type == PrimitiveTypeID::f32 && op == AtomicOpType::add) {
+      val_ty = llvm::Type::getFloatTy(*llvm_context);
+      atomic_op = llvm::AtomicRMWInst::FAdd;
+      identity = llvm::ConstantFP::get(val_ty, 0.0);
+      binop = [this](llvm::Value *a, llvm::Value *b) {
+        return builder->CreateFAdd(a, b);
+      };
+    } else if (prim_type == PrimitiveTypeID::i32 && op == AtomicOpType::add) {
+      val_ty = llvm::Type::getInt32Ty(*llvm_context);
+      atomic_op = llvm::AtomicRMWInst::Add;
+      identity = llvm::ConstantInt::get(val_ty, 0);
+      binop = [this](llvm::Value *a, llvm::Value *b) {
+        return builder->CreateAdd(a, b);
+      };
+    } else {
+      return nullptr;
+    }
+
+    llvm::Value *val = llvm_val[stmt->val];
+    llvm::Value *dest = llvm_val[stmt->dest];
+    if (!val || !dest)
+      return nullptr;
+
+    auto *i32_ty = llvm::Type::getInt32Ty(*llvm_context);
+    auto *all_ones = llvm::ConstantInt::get(i32_ty, ~0u);
+    auto *zero32 = llvm::ConstantInt::get(i32_ty, 0);
+
+    auto *lane_lo = builder->CreateIntrinsic(
+        llvm::Intrinsic::amdgcn_mbcnt_lo, {}, {all_ones, zero32});
+    auto *lane = builder->CreateIntrinsic(
+        llvm::Intrinsic::amdgcn_mbcnt_hi, {}, {all_ones, lane_lo});
+
+    llvm::Value *acc = builder->CreateIntrinsic(
+        llvm::Intrinsic::amdgcn_set_inactive, {val_ty}, {val, identity});
+
+    for (int offset = 32; offset > 0; offset >>= 1) {
+      auto *off_c = llvm::ConstantInt::get(i32_ty, (uint32_t)offset);
+      auto *src_lane = builder->CreateXor(lane, off_c);
+      auto *addr_bytes = builder->CreateShl(src_lane, 2);
+      llvm::Value *acc_i32 = val_ty->isFloatTy()
+                                 ? builder->CreateBitCast(acc, i32_ty)
+                                 : acc;
+      auto *other_i32 = builder->CreateIntrinsic(
+          llvm::Intrinsic::amdgcn_ds_bpermute, {}, {addr_bytes, acc_i32});
+      llvm::Value *other =
+          val_ty->isFloatTy() ? builder->CreateBitCast(other_i32, val_ty)
+                              : other_i32;
+      acc = binop(acc, other);
+    }
+
+    auto *is_lane0 = builder->CreateICmpEQ(lane, zero32);
+    auto *atomic_bb =
+        llvm::BasicBlock::Create(*llvm_context, "wave_reduce_atomic", func);
+    auto *cont_bb =
+        llvm::BasicBlock::Create(*llvm_context, "wave_reduce_cont", func);
+    builder->CreateCondBr(is_lane0, atomic_bb, cont_bb);
+    builder->SetInsertPoint(atomic_bb);
+    builder->CreateAtomicRMW(atomic_op, dest, acc, llvm::MaybeAlign(0),
+                             qd_default_atomic_ordering());
+    builder->CreateBr(cont_bb);
+    builder->SetInsertPoint(cont_bb);
+
+    return val;
+  }
+
   llvm::Value *optimized_reduction(AtomicOpStmt *stmt) override {
     if (!stmt->is_reduction) {
       return nullptr;
     }
     QD_ASSERT(stmt->val->ret_type->is<PrimitiveType>());
+    if (auto *r = try_emit_wave64_reduction(stmt))
+      return r;
     PrimitiveTypeID prim_type =
         stmt->val->ret_type->cast<PrimitiveType>()->type;
     AtomicOpType op = stmt->op_type;
@@ -185,13 +277,13 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       if (i32_ops.find(op) != i32_ops.end()) {
         return builder->CreateAtomicRMW(
             i32_ops.at(op), dest, val, llvm::MaybeAlign(0),
-            llvm::AtomicOrdering::SequentiallyConsistent);
+            qd_default_atomic_ordering());
       }
     } else if (prim_type == PrimitiveTypeID::f32) {
       if (op == AtomicOpType::add) {
         return builder->CreateAtomicRMW(
             llvm::AtomicRMWInst::FAdd, dest, val, llvm::MaybeAlign(0),
-            llvm::AtomicOrdering::SequentiallyConsistent);
+            qd_default_atomic_ordering());
       } else if (op == AtomicOpType::min) {
         return atomic_op_using_cas(
             dest, val,

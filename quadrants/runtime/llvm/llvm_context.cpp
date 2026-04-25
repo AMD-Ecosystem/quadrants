@@ -1,6 +1,7 @@
 // A llvm backend helper
 
 #include "quadrants/runtime/llvm/llvm_context.h"
+#include "quadrants/codegen/llvm/atomic_ordering.h"
 
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/ADT/APFloat.h"
@@ -390,7 +391,7 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
         args.push_back(&arg);
       builder.CreateRet(builder.CreateAtomicRMW(
           op, args[0], args[1], llvm::MaybeAlign(0),
-          llvm::AtomicOrdering::SequentiallyConsistent));
+          quadrants::lang::qd_default_atomic_ordering()));
       QuadrantsLLVMContext::mark_inline(func);
     };
 

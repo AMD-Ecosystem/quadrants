@@ -114,12 +114,19 @@ struct AMDGPUConvertAllocaInstAddressSpacePass : public FunctionPass {
   }
 };
 
-// After O3, remaining addrspace(0) loads/stores are either runtime
-// metadata accesses (global memory) or alloca-derived accesses that
-// InferAddressSpaces couldn't resolve. This pass converts the former
-// to addrspace(1) by using stripPointerCasts() to trace pointer
+// After O3, remaining addrspace(0) loads/stores/atomics are either
+// runtime metadata accesses (global memory) or alloca-derived accesses
+// that InferAddressSpaces couldn't resolve. This pass converts the
+// former to addrspace(1) by using stripPointerCasts() to trace pointer
 // origins: if the origin is an alloca or addrspacecast-from-5
-// (scratch), the load/store is left as flat.
+// (scratch), the access is left as flat.
+//
+// Covers LoadInst, StoreInst, AtomicRMWInst, and AtomicCmpXchgInst.
+// Without the atomic cases, every atomic_add / atomic_or in the IR
+// (e.g. constraint construction, narrowphase work-queue counters,
+// COM accumulation) would lower to flat_atomic_*, going through the
+// FLAT unit's runtime address-space resolution instead of the direct
+// global_atomic_* hardware path.
 struct AMDGPUFlatToGlobalLoadStorePass : public FunctionPass {
   static inline char ID{0};
   AMDGPUFlatToGlobalLoadStorePass() : FunctionPass(ID) {}
@@ -200,6 +207,19 @@ struct AMDGPUFlatToGlobalLoadStorePass : public FunctionPass {
           if (SI->getPointerAddressSpace() == 0 &&
               !originatesFromScratch(SI->getPointerOperand()))
             to_convert.push_back(SI);
+        } else if (auto *RMW = llvm::dyn_cast<llvm::AtomicRMWInst>(&I)) {
+          // Same scratch-vs-global heuristic: SNode-derived atomics arrive
+          // in addrspace(0) (FLAT) but should target addrspace(1) (GLOBAL)
+          // so the codegen emits global_atomic_* instead of flat_atomic_*.
+          // global_atomic_* is faster on gfx942 because it skips the FLAT
+          // unit's runtime address-space resolution.
+          if (RMW->getPointerAddressSpace() == 0 &&
+              !originatesFromScratch(RMW->getPointerOperand()))
+            to_convert.push_back(RMW);
+        } else if (auto *CX = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(&I)) {
+          if (CX->getPointerAddressSpace() == 0 &&
+              !originatesFromScratch(CX->getPointerOperand()))
+            to_convert.push_back(CX);
         }
       }
       for (auto *I : to_convert) {
@@ -213,6 +233,16 @@ struct AMDGPUFlatToGlobalLoadStorePass : public FunctionPass {
           auto *cast = B.CreateAddrSpaceCast(SI->getPointerOperand(),
                                              ptr_global_ty);
           SI->setOperand(SI->getPointerOperandIndex(), cast);
+          modified = true;
+        } else if (auto *RMW = llvm::dyn_cast<llvm::AtomicRMWInst>(I)) {
+          auto *cast = B.CreateAddrSpaceCast(RMW->getPointerOperand(),
+                                             ptr_global_ty);
+          RMW->setOperand(RMW->getPointerOperandIndex(), cast);
+          modified = true;
+        } else if (auto *CX = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(I)) {
+          auto *cast = B.CreateAddrSpaceCast(CX->getPointerOperand(),
+                                             ptr_global_ty);
+          CX->setOperand(CX->getPointerOperandIndex(), cast);
           modified = true;
         }
       }
