@@ -44,6 +44,8 @@ def mem_sync():
     arch = impl.get_runtime().prog.config().arch
     if arch == _qd_core.cuda:
         return impl.call_internal("block_barrier", with_runtime_context=False)
+    if arch == _qd_core.amdgpu:
+        return impl.call_internal("block_memfence", with_runtime_context=False)
     if arch_uses_spv(arch):
         return impl.call_internal("workgroupMemoryBarrier", with_runtime_context=False)
     raise ValueError(f"qd.block.mem_sync is not supported for arch {arch}")

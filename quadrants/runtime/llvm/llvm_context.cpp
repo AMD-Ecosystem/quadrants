@@ -581,6 +581,21 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
                       false);
       patch_intrinsic("amdgpu_clock_i64", llvm::Intrinsic::amdgcn_s_memtime);
 
+      {
+        auto func = module->getFunction("block_memfence");
+        if (func) {
+          func->deleteBody();
+          auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+          IRBuilder<> builder(*ctx);
+          builder.SetInsertPoint(bb);
+          builder.CreateFence(
+              llvm::AtomicOrdering::SequentiallyConsistent,
+              ctx->getOrInsertSyncScopeID("workgroup"));
+          builder.CreateRetVoid();
+          QuadrantsLLVMContext::mark_inline(func);
+        }
+      }
+
       link_module_with_amdgpu_libdevice(module);
       patch_amdgpu_kernel_dim(
           "block_dim", llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0));
