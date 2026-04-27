@@ -14,6 +14,7 @@
 #include "quadrants/codegen/llvm/struct_llvm.h"
 #include "quadrants/util/file_sequence_writer.h"
 #include "quadrants/codegen/codegen_utils.h"
+#include "quadrants/codegen/llvm/atomic_ordering.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/AsmParser/Parser.h"
 #include "quadrants/codegen/ir_dump.h"
@@ -1455,7 +1456,7 @@ llvm::Value *TaskCodeGenLLVM::integral_type_atomic(AtomicOpStmt *stmt) {
   QD_ASSERT(bin_op.find(stmt->op_type) != bin_op.end());
   return builder->CreateAtomicRMW(
       bin_op.at(stmt->op_type), llvm_val[stmt->dest], llvm_val[stmt->val],
-      llvm::MaybeAlign(0), llvm::AtomicOrdering::SequentiallyConsistent);
+      llvm::MaybeAlign(0), qd_default_atomic_ordering());
 }
 
 llvm::Value *TaskCodeGenLLVM::atomic_op_using_cas(
@@ -1490,8 +1491,8 @@ llvm::Value *TaskCodeGenLLVM::atomic_op_using_cas(
     auto atomicCmpXchg = builder->CreateAtomicCmpXchg(
         dest, builder->CreateBitCast(old_val, typeIntTy),
         builder->CreateBitCast(new_val, typeIntTy), llvm::MaybeAlign(0),
-        AtomicOrdering::SequentiallyConsistent,
-        AtomicOrdering::SequentiallyConsistent);
+        qd_default_atomic_ordering(),
+        qd_default_atomic_ordering());
     // Check whether CAS was succussful
     auto ok = builder->CreateExtractValue(atomicCmpXchg, 1);
     builder->CreateCondBr(builder->CreateNot(ok), body, after_loop);
@@ -1535,7 +1536,7 @@ llvm::Value *TaskCodeGenLLVM::real_type_atomic(AtomicOpStmt *stmt) {
     case AtomicOpType::add:
       return builder->CreateAtomicRMW(
           llvm::AtomicRMWInst::FAdd, llvm_val[stmt->dest], llvm_val[stmt->val],
-          llvm::MaybeAlign(0), llvm::AtomicOrdering::SequentiallyConsistent);
+          llvm::MaybeAlign(0), qd_default_atomic_ordering());
     case AtomicOpType::mul:
       return atomic_op_using_cas(
           llvm_val[stmt->dest], llvm_val[stmt->val],

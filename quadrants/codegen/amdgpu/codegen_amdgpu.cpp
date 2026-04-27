@@ -17,6 +17,7 @@
 #include "quadrants/ir/analysis.h"
 #include "quadrants/ir/transforms.h"
 #include "quadrants/codegen/codegen_utils.h"
+#include "quadrants/codegen/llvm/atomic_ordering.h"
 #include "quadrants/inc/constants.h"
 
 namespace quadrants {
@@ -185,13 +186,13 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       if (i32_ops.find(op) != i32_ops.end()) {
         return builder->CreateAtomicRMW(
             i32_ops.at(op), dest, val, llvm::MaybeAlign(0),
-            llvm::AtomicOrdering::SequentiallyConsistent);
+            qd_default_atomic_ordering());
       }
     } else if (prim_type == PrimitiveTypeID::f32) {
       if (op == AtomicOpType::add) {
         return builder->CreateAtomicRMW(
             llvm::AtomicRMWInst::FAdd, dest, val, llvm::MaybeAlign(0),
-            llvm::AtomicOrdering::SequentiallyConsistent);
+            qd_default_atomic_ordering());
       } else if (op == AtomicOpType::min) {
         return atomic_op_using_cas(
             dest, val,
