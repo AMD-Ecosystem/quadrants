@@ -147,6 +147,10 @@ def shuffle_xor(value, mask):
     pass
 
 
+def dpp_swap_pairs(value):
+    return impl.call_internal("subgroupDppSwapPairs", value, with_runtime_context=False)
+
+
 def shuffle_up(value, offset):
     return impl.call_internal("subgroupShuffleUp", value, offset, with_runtime_context=False)
 
@@ -188,4 +192,5 @@ __all__ = [
     "shuffle_xor",
     "shuffle_up",
     "shuffle_down",
+    "dpp_swap_pairs",
 ]

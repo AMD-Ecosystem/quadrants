@@ -399,15 +399,18 @@ def test_range_for_two_arguments():
 def test_range_for_three_arguments():
     a = qd.field(qd.i32, shape=(10,))
 
-    with pytest.raises(qd.QuadrantsCompilationError, match="Range should have 1 or 2 arguments, found 3"):
+    @qd.kernel
+    def foo(x: qd.i32):
+        for i in range(3, 7, 2):
+            a[i] = x
 
-        @qd.kernel
-        def foo(x: qd.i32):
-            for i in range(3, 7, 2):
-                a[i] = x
-
-        x = 5
-        foo(x)
+    a.fill(0)
+    foo(5)
+    for i in range(10):
+        if i in (3, 5):
+            assert a[i] == 5
+        else:
+            assert a[i] == 0
 
 
 @test_utils.test(print_preprocessed_ir=True)
