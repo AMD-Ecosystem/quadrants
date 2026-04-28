@@ -636,6 +636,7 @@ def loop_config(
     parallelize=None,
     block_dim_adaptive=True,
     bit_vectorize=False,
+    name=None,  # genesis-bundle-quadrants-shim: accepted, currently ignored on AMD
 ):
     """Sets directives for the next loop
 
