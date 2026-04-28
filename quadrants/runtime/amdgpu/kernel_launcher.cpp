@@ -276,7 +276,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   // the next H2D won't overwrite anything the previous kernel still needs.
   //
   // This eliminates a malloc_async + mem_free_async pair on every kernel
-  // launch (~50 launches/step × 500 steps for Genesis).
+  // launch.
   thread_local char *persistent_dev_arg_buf = nullptr;
   thread_local std::size_t persistent_dev_arg_buf_cap = 0;
   if (ctx.arg_buffer_size > 0) {
