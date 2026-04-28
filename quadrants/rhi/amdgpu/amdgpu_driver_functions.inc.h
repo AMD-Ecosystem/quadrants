@@ -143,3 +143,33 @@ PER_AMDGPU_FUNCTION(event_elapsed_time,
                     float *,
                     void *,
                     void *);
+
+// HIP graph management (analog to CUDA driver API graph functions used
+// by CudaGraphManager). These let us capture a sequence of kernel launches
+// once and replay them via a single hipGraphLaunch call, eliminating the
+// per-launch HIP runtime overhead. Available since ROCm 5.0+.
+//
+// Conditional-node APIs (hipGraphAddNode for cond nodes, hipGraphConditionalHandleCreate)
+// are intentionally NOT wired here: HIP's conditional-node support is much
+// newer than the basic graph APIs and the generic node-params struct layout
+// is not yet ABI-stable across ROCm point releases. The AMDGPU graph manager
+// declines the graph path when graph_do_while is requested, falling through
+// to the existing host-loop launch path.
+PER_AMDGPU_FUNCTION(graph_create, hipGraphCreate, void **, uint32);
+PER_AMDGPU_FUNCTION(graph_add_kernel_node,
+                    hipGraphAddKernelNode,
+                    void **,
+                    void *,
+                    const void *,
+                    std::size_t,
+                    const void *);
+PER_AMDGPU_FUNCTION(graph_instantiate,
+                    hipGraphInstantiate,
+                    void **,
+                    void *,
+                    void *,
+                    char *,
+                    std::size_t);
+PER_AMDGPU_FUNCTION(graph_launch, hipGraphLaunch, void *, void *);
+PER_AMDGPU_FUNCTION(graph_destroy, hipGraphDestroy, void *);
+PER_AMDGPU_FUNCTION(graph_exec_destroy, hipGraphExecDestroy, void *);

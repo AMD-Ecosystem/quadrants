@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quadrants/codegen/llvm/compiled_kernel_data.h"
+#include "quadrants/runtime/amdgpu/amdgpu_graph_manager.h"
 #include "quadrants/runtime/amdgpu/device_scratch_buffer.h"
 #include "quadrants/runtime/llvm/kernel_launcher.h"
 
@@ -61,6 +62,18 @@ class KernelLauncher : public LLVM::KernelLauncher {
       const std::vector<OffloadedTask> &offloaded_tasks);
   bool on_amdgpu_device(void *ptr);
   std::vector<Context> contexts_;
+
+  // Cached HIP-graph manager. When the kernel was registered with
+  // cuda_graph=True (yes, named for CUDA legacy reasons -- the same
+  // attribute drives the HIP graph path on AMDGPU), launch_llvm_kernel
+  // dispatches here first; the manager falls through and returns false
+  // when the graph path can't be used (graph_do_while, host-resident
+  // ndarrays, kernel returns a value), in which case we run the normal
+  // launch path below.
+  //
+  // One manager per launcher (i.e. per LlvmRuntimeExecutor); the manager
+  // internally caches one hipGraphExec_t per launch_id.
+  AmdgpuGraphManager graph_manager_;
 };
 
 }  // namespace amdgpu

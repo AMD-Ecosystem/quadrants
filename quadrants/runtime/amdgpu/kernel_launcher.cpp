@@ -118,6 +118,20 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   AMDGPUContext::get_instance().make_current();
   ctx.get_context().runtime = executor->get_llvm_runtime();
 
+  // HIP graph fast path: when the kernel was registered with cuda_graph=True
+  // (named for legacy CUDA reasons -- the same Python-side kwarg flips the
+  // bit on AMDGPU too), try the cached HIP-graph launcher. If the manager
+  // declines (graph_do_while requested, host-resident ndarray, kernel
+  // returns a value), fall through to the normal per-launch path below.
+  // See AmdgpuGraphManager docstring for the full v1 scope.
+  if (ctx.use_cuda_graph) {
+    if (graph_manager_.try_launch(handle.get_launch_id(), ctx, amdgpu_module,
+                                  parameters, offloaded_tasks, executor)) {
+      return;
+    }
+  }
+  graph_manager_.mark_not_used();
+
   exp12_diag::KernelBranchCounts *branch_counts = nullptr;
   if (exp12_diag::diag_enabled && !offloaded_tasks.empty()) {
     branch_counts = &exp12_diag::get_or_create(offloaded_tasks.front().name);
