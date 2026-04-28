@@ -122,7 +122,13 @@ struct AMDGPUConvertAllocaInstAddressSpacePass : public FunctionPass {
 // (scratch), the load/store is left as flat.
 struct AMDGPUFlatToGlobalLoadStorePass : public FunctionPass {
   static inline char ID{0};
-  AMDGPUFlatToGlobalLoadStorePass() : FunctionPass(ID) {}
+  bool nontemporal_loads_;
+  bool nontemporal_stores_;
+  AMDGPUFlatToGlobalLoadStorePass(bool nontemporal_loads = false,
+                                  bool nontemporal_stores = false)
+      : FunctionPass(ID),
+        nontemporal_loads_(nontemporal_loads),
+        nontemporal_stores_(nontemporal_stores) {}
 
   static bool originatesFromScratch(llvm::Value *ptr,
                                     llvm::SmallPtrSetImpl<llvm::Value *> &Visited) {
@@ -189,6 +195,14 @@ struct AMDGPUFlatToGlobalLoadStorePass : public FunctionPass {
   bool runOnFunction(llvm::Function &F) override {
     bool modified = false;
     auto *ptr_global_ty = llvm::PointerType::get(F.getContext(), 1);
+    // Reusable !nontemporal {i32 1} metadata node for the cache-hint
+    // tagging done below. Lazily built only if at least one NT flag is on.
+    llvm::MDNode *nontemporal_md = nullptr;
+    if (nontemporal_loads_ || nontemporal_stores_) {
+      auto *one_md = llvm::ConstantAsMetadata::get(
+          llvm::ConstantInt::get(llvm::Type::getInt32Ty(F.getContext()), 1));
+      nontemporal_md = llvm::MDNode::get(F.getContext(), {one_md});
+    }
     for (auto &BB : F) {
       std::vector<llvm::Instruction *> to_convert;
       for (auto &I : BB) {
@@ -208,11 +222,21 @@ struct AMDGPUFlatToGlobalLoadStorePass : public FunctionPass {
           auto *cast = B.CreateAddrSpaceCast(LI->getPointerOperand(),
                                              ptr_global_ty);
           LI->setOperand(LI->getPointerOperandIndex(), cast);
+          if (nontemporal_loads_) {
+            // !nontemporal hints the AMDGPU backend to emit a cache-bypass
+            // (NT/GLC) modifier on this load, biasing it away from L1.
+            LI->setMetadata(llvm::LLVMContext::MD_nontemporal,
+                            nontemporal_md);
+          }
           modified = true;
         } else if (auto *SI = llvm::dyn_cast<llvm::StoreInst>(I)) {
           auto *cast = B.CreateAddrSpaceCast(SI->getPointerOperand(),
                                              ptr_global_ty);
           SI->setOperand(SI->getPointerOperandIndex(), cast);
+          if (nontemporal_stores_) {
+            SI->setMetadata(llvm::LLVMContext::MD_nontemporal,
+                            nontemporal_md);
+          }
           modified = true;
         }
       }

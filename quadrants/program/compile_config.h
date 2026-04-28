@@ -102,7 +102,45 @@ struct CompileConfig {
 
   size_t cuda_stack_limit{0};
 
-  bool amdgpu_auto_waves_per_eu{true};
+  // Selects the AMDGPU "amdgpu-waves-per-eu" attribute applied to heavy
+  // kernels in jit_amdgpu.cpp:
+  //   false (default): legacy "1,2" budget — permits VGPR-heavy,
+  //                    low-occupancy codegen. Wins for kernels whose
+  //                    inlined call chain genuinely needs >256 archived
+  //                    registers/wave (e.g. constraint solver monolith).
+  //   true:            "4,8" budget — forces fewer VGPRs/wave so more
+  //                    waves co-reside per SIMD. Helpful for memory-
+  //                    latency-bound kernels with small live-range graphs,
+  //                    but pays heavy scratch-spill traffic on register-
+  //                    heavy kernels and can regress overall perf.
+  // Override from Python (qd.init(amdgpu_auto_waves_per_eu=True)) or env
+  // var (QD_AMDGPU_AUTO_WAVES_PER_EU=1).
+  bool amdgpu_auto_waves_per_eu{false};
+
+  // When true, AMDGPU global-memory loads (those that the
+  // AMDGPUFlatToGlobalLoadStorePass converts from addrspace(0) flat to
+  // addrspace(1) global) are tagged with LLVM !nontemporal metadata.
+  // The AMDGPU backend lowers this to a cache hint that biases the load
+  // away from the L1 vector cache (16 KB / CU on gfx942), which is
+  // useful when the kernel's working set is many times the L1 size and
+  // L1 mostly serves as a pollution channel rather than a true cache.
+  // Helpful for memory-latency-bound kernels reading large data
+  // structures (e.g., the constraint solver's 181 MB Jacobian on
+  // 8192-batch G1 sims). May regress kernels whose hot-set genuinely
+  // fits in L1.
+  // Toggle from Python (qd.init(amdgpu_nontemporal_global_loads=True))
+  // or env var (QD_AMDGPU_NONTEMPORAL_GLOBAL_LOADS=1).
+  bool amdgpu_nontemporal_global_loads{false};
+
+  // Same idea as amdgpu_nontemporal_global_loads, but for global
+  // stores. The hint asks the cache hierarchy to write through rather
+  // than allocating an L1 line, freeing L1 for read traffic. Useful
+  // when stored values won't be re-read soon by the same wave (e.g.,
+  // per-iter result writes that are read again only in the next solver
+  // iteration after the L1 line would have been evicted anyway).
+  // Toggle from Python (qd.init(amdgpu_nontemporal_global_stores=True))
+  // or env var (QD_AMDGPU_NONTEMPORAL_GLOBAL_STORES=1).
+  bool amdgpu_nontemporal_global_stores{false};
 
   CompileConfig();
 

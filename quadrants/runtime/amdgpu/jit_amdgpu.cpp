@@ -88,7 +88,19 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
               std::string::npos;
 
       if (!is_lightweight_cg_subkernel) {
-        F.addFnAttr("amdgpu-waves-per-eu", "1,2");
+        // CompileConfig::amdgpu_auto_waves_per_eu (default false) selects
+        // an occupancy-favoring budget ("4,8") so LLVM allocates fewer VGPRs
+        // per wave and more waves can co-reside per SIMD. Trades higher
+        // potential VGPR-spill traffic for better latency hiding, which is
+        // the right call for memory-latency-bound kernels (e.g.
+        // func_solve_body_monolith on gfx942: ~410 archived regs/wave =>
+        // 1 wave/SIMD = 12.5% theoretical occupancy).
+        // Default (false) keeps the legacy "1,2" budget for VGPR-heavy /
+        // compute-bound codegen; set true from Python
+        // (qd.cfg.amdgpu_auto_waves_per_eu = True) to opt into "4,8".
+        const char *waves_per_eu =
+            this->config_.amdgpu_auto_waves_per_eu ? "4,8" : "1,2";
+        F.addFnAttr("amdgpu-waves-per-eu", waves_per_eu);
       }
       F.addFnAttr("uniform-work-group-size", "true");
       F.addFnAttr("amdgpu-ieee", "false");
@@ -272,7 +284,12 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   // downstream of get_runtime() returning addrspace(0). Conservative walk
   // handles PHI/Select/AddrSpaceCast(srcAS=5)
   // and stops at LoadInst — secondary loads through GEPs ARE converted.
-  extra_fpm.add(new AMDGPUFlatToGlobalLoadStorePass());
+  // Optional NT cache hints (CompileConfig::amdgpu_nontemporal_global_*) are
+  // tagged here, on the same set of memory ops the pass converts to
+  // addrspace(1). See compile_config.h for the rationale and toggles.
+  extra_fpm.add(new AMDGPUFlatToGlobalLoadStorePass(
+      this->config_.amdgpu_nontemporal_global_loads,
+      this->config_.amdgpu_nontemporal_global_stores));
   extra_fpm.doInitialization();
   for (auto func = llvm_module->begin(); func != llvm_module->end(); ++func)
     extra_fpm.run(*func);
