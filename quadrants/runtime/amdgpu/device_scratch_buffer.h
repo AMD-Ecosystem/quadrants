@@ -96,8 +96,11 @@ class DeviceScratchBuffer {
   // stream in the future can plumb it through here without touching this
   // class.
   explicit DeviceScratchBuffer(void *stream = nullptr) noexcept
-      : stream_(stream) {}
-  ~DeviceScratchBuffer() noexcept { release(); }
+      : stream_(stream) {
+  }
+  ~DeviceScratchBuffer() noexcept {
+    release();
+  }
 
   DeviceScratchBuffer(const DeviceScratchBuffer &) = delete;
   DeviceScratchBuffer &operator=(const DeviceScratchBuffer &) = delete;
@@ -106,9 +109,7 @@ class DeviceScratchBuffer {
   // stream the source was bound to. The source is left in a valid empty
   // state on its (unchanged) stream.
   DeviceScratchBuffer(DeviceScratchBuffer &&other) noexcept
-      : stream_(other.stream_),
-        ptr_(other.ptr_),
-        capacity_(other.capacity_) {
+      : stream_(other.stream_), ptr_(other.ptr_), capacity_(other.capacity_) {
     other.ptr_ = nullptr;
     other.capacity_ = 0;
   }
@@ -144,9 +145,15 @@ class DeviceScratchBuffer {
     return ptr_;
   }
 
-  char *get() const noexcept { return ptr_; }
-  std::size_t capacity() const noexcept { return capacity_; }
-  void *stream() const noexcept { return stream_; }
+  char *get() const noexcept {
+    return ptr_;
+  }
+  std::size_t capacity() const noexcept {
+    return capacity_;
+  }
+  void *stream() const noexcept {
+    return stream_;
+  }
 
   // Rebinds the buffer to a new stream. Only legal on an empty buffer
   // (capacity == 0); rebinding while holding an allocation would risk
@@ -178,4 +185,3 @@ class DeviceScratchBuffer {
 
 }  // namespace amdgpu
 }  // namespace quadrants::lang
-

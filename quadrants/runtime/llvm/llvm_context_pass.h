@@ -128,10 +128,12 @@ struct AMDGPUFlatToGlobalLoadStorePass : public FunctionPass {
                                   bool nontemporal_stores = false)
       : FunctionPass(ID),
         nontemporal_loads_(nontemporal_loads),
-        nontemporal_stores_(nontemporal_stores) {}
+        nontemporal_stores_(nontemporal_stores) {
+  }
 
-  static bool originatesFromScratch(llvm::Value *ptr,
-                                    llvm::SmallPtrSetImpl<llvm::Value *> &Visited) {
+  static bool originatesFromScratch(
+      llvm::Value *ptr,
+      llvm::SmallPtrSetImpl<llvm::Value *> &Visited) {
     auto *origin = ptr->stripPointerCasts();
     if (!Visited.insert(origin).second)
       return false;  // already on the walk path — break the cycle
@@ -219,23 +221,21 @@ struct AMDGPUFlatToGlobalLoadStorePass : public FunctionPass {
       for (auto *I : to_convert) {
         llvm::IRBuilder<> B(I);
         if (auto *LI = llvm::dyn_cast<llvm::LoadInst>(I)) {
-          auto *cast = B.CreateAddrSpaceCast(LI->getPointerOperand(),
-                                             ptr_global_ty);
+          auto *cast =
+              B.CreateAddrSpaceCast(LI->getPointerOperand(), ptr_global_ty);
           LI->setOperand(LI->getPointerOperandIndex(), cast);
           if (nontemporal_loads_) {
             // !nontemporal hints the AMDGPU backend to emit a cache-bypass
             // (NT/GLC) modifier on this load, biasing it away from L1.
-            LI->setMetadata(llvm::LLVMContext::MD_nontemporal,
-                            nontemporal_md);
+            LI->setMetadata(llvm::LLVMContext::MD_nontemporal, nontemporal_md);
           }
           modified = true;
         } else if (auto *SI = llvm::dyn_cast<llvm::StoreInst>(I)) {
-          auto *cast = B.CreateAddrSpaceCast(SI->getPointerOperand(),
-                                             ptr_global_ty);
+          auto *cast =
+              B.CreateAddrSpaceCast(SI->getPointerOperand(), ptr_global_ty);
           SI->setOperand(SI->getPointerOperandIndex(), cast);
           if (nontemporal_stores_) {
-            SI->setMetadata(llvm::LLVMContext::MD_nontemporal,
-                            nontemporal_md);
+            SI->setMetadata(llvm::LLVMContext::MD_nontemporal, nontemporal_md);
           }
           modified = true;
         }

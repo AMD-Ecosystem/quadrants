@@ -15,8 +15,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
   // contexts_ vector relies on move semantics during resize.
   struct Context {
     JITModule *jit_module{nullptr};
-    const std::vector<std::pair<int, Callable::Parameter>> *parameters{
-        nullptr};
+    const std::vector<std::pair<int, Callable::Parameter>> *parameters{nullptr};
     std::vector<OffloadedTask> offloaded_tasks;
 
     // Cached device scratch buffers, lazily sized on first launch and
@@ -65,4 +64,3 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
 }  // namespace amdgpu
 }  // namespace quadrants::lang
-

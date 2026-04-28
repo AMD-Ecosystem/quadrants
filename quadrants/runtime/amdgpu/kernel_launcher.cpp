@@ -74,8 +74,8 @@ void KernelLauncher::launch_offloaded_tasks(
     QD_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
              task.block_dim);
     amdgpu_module->launch(task.name, task.grid_dim, task.block_dim,
-                          task.dynamic_shared_array_bytes,
-                          {&ctx.get_context()}, {kRuntimeContextArgSize});
+                          task.dynamic_shared_array_bytes, {&ctx.get_context()},
+                          {kRuntimeContextArgSize});
   }
 }
 
@@ -153,16 +153,17 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
           LaunchContextBuilder::DevAllocType::kNone) {
         if (on_amdgpu_device(data_ptr)) {
           if (branch_counts) {
-            branch_counts->kNone_on_device.fetch_add(
-                1, std::memory_order_relaxed);
+            branch_counts->kNone_on_device.fetch_add(1,
+                                                     std::memory_order_relaxed);
           }
           device_ptrs[data_ptr_idx] = data_ptr;
         } else {
           if (branch_counts) {
-            branch_counts->kNone_host_copy.fetch_add(
-                1, std::memory_order_relaxed);
+            branch_counts->kNone_host_copy.fetch_add(1,
+                                                     std::memory_order_relaxed);
           }
-          device_result_buffer = launcher_ctx.device_result_buffer.ensure(sizeof(uint64));
+          device_result_buffer =
+              launcher_ctx.device_result_buffer.ensure(sizeof(uint64));
           DeviceAllocation devalloc = executor->allocate_memory_on_device(
               arr_sz, (uint64 *)device_result_buffer);
           device_ptrs[data_ptr_idx] =
@@ -199,7 +200,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   // the arg-buffer async H2D below is stream-ordered with the kernel.
   char *host_result_buffer = (char *)ctx.get_context().result_buffer;
   if (ctx.result_buffer_size > 0) {
-    device_result_buffer = launcher_ctx.device_result_buffer.ensure(std::max(ctx.result_buffer_size, sizeof(uint64)));
+    device_result_buffer = launcher_ctx.device_result_buffer.ensure(
+        std::max(ctx.result_buffer_size, sizeof(uint64)));
     ctx.get_context().result_buffer = (uint64 *)device_result_buffer;
   }
   if (ctx.arg_buffer_size > 0) {
@@ -268,4 +270,3 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
 
 }  // namespace amdgpu
 }  // namespace quadrants::lang
-
