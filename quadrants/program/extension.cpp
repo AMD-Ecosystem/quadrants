@@ -29,7 +29,11 @@ bool is_extension_supported(Arch arch, Extension ext) {
       // `@test_utils.test(require=qd.extension.bls)` decorator.
       // Reverted to baseline (Extension::assertion only) until sparse
       // SNode codegen is implemented for AMDGPU.
-      {Arch::amdgpu, {Extension::assertion}},
+      // NOTE(amdgpu): Extension::adstack added per upstream 7274da92b
+      // (gradient-fix). Required for the AMDGPU autodiff path to be
+      // exercised by ndarray-grad tests; the kernel_launcher gradient-pointer
+      // copy below assumes the adstack lowering pass actually runs.
+      {Arch::amdgpu, {Extension::adstack, Extension::assertion}},
       {Arch::metal, {}},
       {Arch::vulkan, {}},
   };

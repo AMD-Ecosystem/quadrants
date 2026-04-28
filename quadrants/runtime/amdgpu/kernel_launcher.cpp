@@ -148,15 +148,24 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       ArgArrayPtrKey data_ptr_idx{arg_id, TypeFactory::DATA_PTR_POS_IN_NDARRAY};
       ArgArrayPtrKey grad_ptr_idx{arg_id, TypeFactory::GRAD_PTR_POS_IN_NDARRAY};
       auto data_ptr = ctx.array_ptrs[data_ptr_idx];
+      // Upstream 7274da92b: also pull the host-side grad pointer up here so
+      // both the kNone and Ndarray branches can route it through the same
+      // host->device transfer / device-pointer-extraction logic. Without
+      // this, the launcher used to pass the raw host grad_ptr straight to
+      // set_ndarray_ptrs, producing a bogus device address inside the
+      // generated kernel and silently-wrong gradients on AMDGPU autodiff.
+      auto grad_ptr = ctx.array_ptrs[grad_ptr_idx];
 
       if (ctx.device_allocation_type[arg_id] ==
           LaunchContextBuilder::DevAllocType::kNone) {
+        // External array. Assume both data and grad live on the same device.
         if (on_amdgpu_device(data_ptr)) {
           if (branch_counts) {
             branch_counts->kNone_on_device.fetch_add(
                 1, std::memory_order_relaxed);
           }
           device_ptrs[data_ptr_idx] = data_ptr;
+          device_ptrs[grad_ptr_idx] = grad_ptr;
         } else {
           if (branch_counts) {
             branch_counts->kNone_host_copy.fetch_add(
@@ -171,9 +180,30 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
 
           AMDGPUDriver::get_instance().memcpy_host_to_device(
               (void *)device_ptrs[data_ptr_idx], data_ptr, arr_sz);
+
+          // Mirror the data-side allocation+H2D for the gradient buffer
+          // when one is supplied. Same arr_sz (gradient shape == data shape)
+          // and we reuse the cached device_result_buffer because
+          // allocate_memory_on_device is stream-synchronous from the host's
+          // perspective. The post-launch loop walks `transfers` and does
+          // the D2H copy + free for each entry, so adding the grad entry
+          // here gives us correct gradient writeback for free.
+          if (grad_ptr != nullptr) {
+            DeviceAllocation grad_devalloc =
+                executor->allocate_memory_on_device(
+                    arr_sz, (uint64 *)device_result_buffer);
+            device_ptrs[grad_ptr_idx] =
+                executor->get_device_alloc_info_ptr(grad_devalloc);
+            transfers[grad_ptr_idx] = {grad_ptr, grad_devalloc};
+
+            AMDGPUDriver::get_instance().memcpy_host_to_device(
+                (void *)device_ptrs[grad_ptr_idx], grad_ptr, arr_sz);
+          } else {
+            device_ptrs[grad_ptr_idx] = nullptr;
+          }
         }
         ctx.set_ndarray_ptrs(arg_id, (uint64)device_ptrs[data_ptr_idx],
-                             (uint64)ctx.array_ptrs[grad_ptr_idx]);
+                             (uint64)device_ptrs[grad_ptr_idx]);
         if (arg_id == ctx.graph_do_while_arg_id) {
           ctx.graph_do_while_flag_dev_ptr = device_ptrs[data_ptr_idx];
         }
@@ -187,8 +217,18 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
         // Unwrapped raw ptr on device
         device_ptrs[data_ptr_idx] = executor->get_device_alloc_info_ptr(*ptr);
 
+        // Same unwrap for the gradient ndarray when one is supplied.
+        // Without this the kernel got a host DeviceAllocation* pointer in
+        // place of the actual device address.
+        if (grad_ptr != nullptr) {
+          ptr = static_cast<DeviceAllocation *>(grad_ptr);
+          device_ptrs[grad_ptr_idx] = executor->get_device_alloc_info_ptr(*ptr);
+        } else {
+          device_ptrs[grad_ptr_idx] = nullptr;
+        }
+
         ctx.set_ndarray_ptrs(arg_id, (uint64)device_ptrs[data_ptr_idx],
-                             (uint64)ctx.array_ptrs[grad_ptr_idx]);
+                             (uint64)device_ptrs[grad_ptr_idx]);
         if (arg_id == ctx.graph_do_while_arg_id) {
           ctx.graph_do_while_flag_dev_ptr = device_ptrs[data_ptr_idx];
         }
