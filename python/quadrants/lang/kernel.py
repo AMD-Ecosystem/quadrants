@@ -293,6 +293,17 @@ class Kernel(FuncBase):
         self.has_print = False
         self.use_cuda_graph: bool = False
         self.graph_do_while_arg: str | None = None
+        # Eager scan of the kernel's source AST for `qd.graph_do_while(varname)`,
+        # so `graph_do_while_arg` is populated at decorator/__init__ time --
+        # before any compile or fastcache load. The AST-transformer also sets
+        # this field (ast_transformer.py:1227), but only when AST transformation
+        # actually runs; on a fastcache hit the front-end is skipped and the
+        # field would otherwise stay None, causing all per-launcher
+        # `graph_do_while_arg_id < 0` checks to spuriously evaluate true and
+        # downstream graph-capturing launchers (CUDA / our new D2 AMDGPU) to
+        # try to capture conditional-loop kernels as plain kernel graphs.
+        # Picked up here it survives every fastcache hit.
+        self._eager_detect_graph_do_while_arg()
         self.quadrants_callable: QuadrantsCallable | None = None
         self.visited_functions: set[FunctionSourceInfo] = set()
         self.kernel_function_info: FunctionSourceInfo | None = None
@@ -315,6 +326,48 @@ class Kernel(FuncBase):
     def ast_builder(self) -> ASTBuilder:
         assert self.kernel_cpp is not None
         return self.kernel_cpp.ast_builder()
+
+    def _eager_detect_graph_do_while_arg(self) -> None:
+        """Scan kernel source AST for `qd.graph_do_while(name)` at __init__.
+
+        Same detection pattern as ASTTransformer._is_graph_do_while_call (kept
+        deliberately separate to avoid pulling the full AST transformer at
+        kernel-decoration time). Sets self.graph_do_while_arg on first match.
+
+        Why eager: ASTTransformer runs only on a compile / front-end pass.
+        On a fastcache hit the front-end is skipped, so a kernel like
+        `_kernel_solve_graph` in the Genesis perf bundle would have
+        graph_do_while_arg == None on every cold->warm transition. That makes
+        downstream graph-capturing launchers (CUDA's CudaGraphManager and
+        AMDGPU's AmdgpuGraphManager) incorrectly treat the kernel as a plain
+        cuda_graph kernel and try to add it as a single hipGraphAddKernelNode
+        / cuGraphAddKernelNode -- which fails (HIP returns
+        hipErrorInvalidConfiguration; CUDA varies). Doing the scan here, at
+        kernel object construction, means it survives every fastcache hit.
+        """
+        try:
+            import ast as _ast
+            import inspect as _inspect
+            import textwrap as _textwrap
+            src = _inspect.getsource(self.func)
+            src = _textwrap.dedent(src)
+            tree = _ast.parse(src)
+        except (OSError, TypeError, SyntaxError):
+            # No source available (e.g. interactive REPL) or parse failure
+            # -- fall back to old behavior (AST transformer will handle it
+            # on cold compile; warm fastcache may still misfire).
+            return
+        for node in _ast.walk(tree):
+            if not isinstance(node, _ast.Call):
+                continue
+            f = node.func
+            attr_match = isinstance(f, _ast.Attribute) and f.attr == "graph_do_while"
+            name_match = isinstance(f, _ast.Name) and f.id == "graph_do_while"
+            if (attr_match or name_match) and len(node.args) == 1 and isinstance(
+                node.args[0], _ast.Name
+            ):
+                self.graph_do_while_arg = node.args[0].id
+                return
 
     def reset(self) -> None:
         self.runtime = impl.get_runtime()
