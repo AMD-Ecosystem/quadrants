@@ -154,10 +154,30 @@ void *AmdgpuGraphManager::add_kernel_node(void *graph,
   params.kernelParams = kernel_params;
   params.extra = nullptr;
 
+  // Diagnostic for the warm-fastcache hipErrorInvalidConfiguration bug.
+  // Always-on for debugging this issue; remove once root-caused.
+  fprintf(stderr,
+          "[amdgpu_graph DBG] add_kernel_node func=%p grid=%u block=%u "
+          "shared=%u kernel_params=%p prev=%p\n",
+          func, grid_dim, block_dim, shared_mem, (void *)kernel_params,
+          prev_node);
+  fflush(stderr);
+
   void *node = nullptr;
-  AMDGPUDriver::get_instance().graph_add_kernel_node(
-      &node, graph, prev_node ? &prev_node : nullptr, prev_node ? 1 : 0,
-      &params);
+  // Use .call() instead of operator() so we can inspect the error without
+  // raising. On non-zero, leave node=nullptr; caller checks.
+  uint32_t err =
+      AMDGPUDriver::get_instance().graph_add_kernel_node.call(
+          &node, graph, prev_node ? &prev_node : nullptr, prev_node ? 1 : 0,
+          &params);
+  if (err != HIP_SUCCESS) {
+    fprintf(stderr,
+            "[amdgpu_graph DBG] add_kernel_node FAILED err=%u "
+            "func=%p grid=%u block=%u shared=%u\n",
+            err, func, grid_dim, block_dim, shared_mem);
+    fflush(stderr);
+    return nullptr;
+  }
   return node;
 }
 
@@ -258,12 +278,38 @@ bool AmdgpuGraphManager::try_launch(
   AMDGPUDriver::get_instance().graph_create(&graph, 0);
 
   void *prev_node = nullptr;
+  bool any_node_failed = false;
   for (const auto &task : offloaded_tasks) {
     void *ctx_ptr = &cached.persistent_ctx;
+    void *func_ptr = amdgpu_module->lookup_function(task.name);
+    fprintf(stderr,
+            "[amdgpu_graph DBG] task name=%s lookup_function=%p "
+            "grid_dim=%d block_dim=%d shared=%d\n",
+            task.name.c_str(), func_ptr, (int)task.grid_dim,
+            (int)task.block_dim, (int)task.dynamic_shared_array_bytes);
+    fflush(stderr);
     prev_node = add_kernel_node(
-        graph, prev_node, amdgpu_module->lookup_function(task.name),
+        graph, prev_node, func_ptr,
         (unsigned int)task.grid_dim, (unsigned int)task.block_dim,
         (unsigned int)task.dynamic_shared_array_bytes, &ctx_ptr);
+    if (prev_node == nullptr) {
+      any_node_failed = true;
+      break;
+    }
+  }
+
+  // Robustness: if any node failed to add, abandon the graph path for
+  // this launch_id and let the caller use the per-launch fallback. The
+  // partial graph + persistent buffers are cleaned up on scope exit
+  // (cached's destructor frees them; graph itself is destroyed below).
+  if (any_node_failed) {
+    AMDGPUDriver::get_instance().graph_destroy(graph);
+    fprintf(stderr,
+            "[amdgpu_graph DBG] abandoning graph build for launch_id=%d; "
+            "falling back to per-launch path\n",
+            launch_id);
+    fflush(stderr);
+    return false;
   }
 
   // --- Instantiate and launch ---
