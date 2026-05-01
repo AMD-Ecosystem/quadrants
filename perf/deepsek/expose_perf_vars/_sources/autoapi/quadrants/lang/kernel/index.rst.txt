@@ -96,6 +96,12 @@ Module Contents
 
 
 
+   .. py:attribute:: fn_attrs
+      :type:  dict[str, dict[str, str]] | None
+      :value: None
+
+
+
    .. py:attribute:: graph_do_while_arg
       :type:  str | None
       :value: None
