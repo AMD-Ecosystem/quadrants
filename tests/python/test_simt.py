@@ -655,3 +655,28 @@ def test_subgroup_broadcast_f32_amdgpu():
     # Every lane should hold lane 0's value (= 0 * 0.25 + 100.0 = 100.0).
     for i in range(N):
         assert a[i] == approx(100.0, abs=1e-5)
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_warp_sync_amdgpu_smoke():
+    # qd.simt.warp.sync(mask) must be a usable no-op-with-ordering on
+    # AMDGPU (lowered to amdgcn.wave_barrier). Pre-fix it lowered to
+    # the empty runtime stub, which had no scheduling-barrier semantics.
+    # This test only confirms the call compiles and runs without a
+    # codegen / link / runtime error; the memory-ordering effect is
+    # tested separately by the existing forward_dynamics.py callsite,
+    # which exercises the producer/consumer ordering across the call.
+    a = qd.field(dtype=qd.i32, shape=64)
+
+    @qd.kernel
+    def foo():
+        qd.loop_config(block_dim=64)
+        for i in range(64):
+            a[i] = i + 1
+            qd.simt.warp.sync(qd.u32(0xFFFFFFFF))
+            a[i] = a[i] + 10
+
+    foo()
+
+    for i in range(64):
+        assert a[i] == i + 11

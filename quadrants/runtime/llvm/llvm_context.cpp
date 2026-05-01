@@ -581,6 +581,40 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
                       false);
       patch_intrinsic("amdgpu_clock_i64", llvm::Intrinsic::amdgcn_s_memtime);
 
+      // warp_barrier(mask): on CUDA this lowers to nvvm.bar.warp.sync,
+      // which both forces lane re-convergence (pre-Volta-ITS-style) and
+      // acts as a memory-ordering barrier. AMDGPU waves execute in
+      // lockstep (no ITS), so re-convergence is implicit, but the
+      // memory-ordering / scheduling-barrier semantic still matters --
+      // without it the optimizer is free to reorder global loads/stores
+      // across the call. The mask argument is a CUDA-ism (32-bit lane
+      // mask); on AMDGPU's 64-lane waves there is no analogous masked
+      // sync, so we drop the mask and lower to amdgcn.wave_barrier,
+      // which is a zero-cost runtime no-op that the scheduler must
+      // respect as a barrier.
+      //
+      // Pre-this-fix: warp_barrier on AMDGPU fell through to the empty
+      // C stub `void warp_barrier(uint32 mask) {}` in
+      // runtime_module/runtime.cpp -- syntactically a function call,
+      // but with no ordering semantics, so the optimizer could and
+      // did reorder memory ops freely across it.
+      {
+        auto func = module->getFunction("warp_barrier");
+        if (func) {
+          func->deleteBody();
+          auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+          IRBuilder<> builder(*ctx);
+          builder.SetInsertPoint(bb);
+          // amdgcn.wave_barrier takes no args, returns void. The mask
+          // argument is intentionally discarded.
+          builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_wave_barrier,
+                                  llvm::ArrayRef<llvm::Type *>{},
+                                  llvm::ArrayRef<llvm::Value *>{});
+          builder.CreateRetVoid();
+          QuadrantsLLVMContext::mark_inline(func);
+        }
+      }
+
       link_module_with_amdgpu_libdevice(module);
       patch_amdgpu_kernel_dim(
           "block_dim", llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0));
