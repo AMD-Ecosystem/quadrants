@@ -376,6 +376,12 @@ class TaskCodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
 
   void visit(InternalFuncStmt *stmt) override;
 
+  // AMDGPU lowering for subgroup primitives that have no cross-platform
+  // runtime stub. Returns nullptr if `stmt` is not a subgroup op handled
+  // here, in which case the caller falls back to the generic call path.
+  // Only valid when current_arch() == Arch::amdgpu.
+  llvm::Value *try_emit_amdgpu_subgroup_op(InternalFuncStmt *stmt);
+
   // Stack statements
 
   void visit(AdStackAllocaStmt *stmt) override;

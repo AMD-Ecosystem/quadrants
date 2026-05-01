@@ -555,3 +555,103 @@ def test_subgroup_reduction_max_f32():
 @test_utils.test(arch=qd.vulkan)
 def test_subgroup_reduction_min_f32():
     _test_subgroup_reduce(qd.atomic_max, subgroup.reduce_max, np.max, 2677, 0, qd.f32)
+
+
+# === AMDGPU subgroup primitives =============================================
+# These exercise the AMDGPU LLVM lowering of subgroup ops added in
+# quadrants/codegen/llvm/codegen_llvm.cpp::try_emit_amdgpu_subgroup_op.
+#
+# Wave size on AMDGPU is 64 (vs 32 on CUDA). Tests run with block_dim=64
+# so a single workgroup fits one wave end-to-end and every lane
+# participates in the subgroup op.
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_subgroup_shuffle_i32_amdgpu():
+    # Each lane i pulls the value from lane (i ^ 1), i.e. pairwise swap
+    # within the wave. This exercises the runtime-lane path
+    # (amdgcn.ds.bpermute), not the compile-time-constant fast path.
+    N = 64
+    a = qd.field(dtype=qd.i32, shape=N)
+
+    @qd.kernel
+    def foo():
+        qd.loop_config(block_dim=N)
+        for i in range(N):
+            src_lane = qd.u32(i ^ 1)
+            a[i] = subgroup.shuffle(a[i], src_lane)
+
+    for i in range(N):
+        a[i] = i + 100
+
+    foo()
+
+    for i in range(N):
+        assert a[i] == (i ^ 1) + 100
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_subgroup_shuffle_f32_amdgpu():
+    N = 64
+    a = qd.field(dtype=qd.f32, shape=N)
+
+    @qd.kernel
+    def foo():
+        qd.loop_config(block_dim=N)
+        for i in range(N):
+            src_lane = qd.u32(i ^ 1)
+            a[i] = subgroup.shuffle(a[i], src_lane)
+
+    for i in range(N):
+        a[i] = float(i) + 0.5
+
+    foo()
+
+    for i in range(N):
+        assert a[i] == approx(float(i ^ 1) + 0.5, abs=1e-5)
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_subgroup_broadcast_i32_amdgpu():
+    # subgroup.broadcast with a compile-time constant lane should pull
+    # the same value to every lane. With const lane the AMDGPU lowering
+    # uses amdgcn.readlane (single SALU op); semantically equivalent to
+    # ds.bpermute with the same lane.
+    N = 64
+    a = qd.field(dtype=qd.i32, shape=N)
+
+    @qd.kernel
+    def foo():
+        qd.loop_config(block_dim=N)
+        for i in range(N):
+            # Source lane = 7 (a constant); every lane gets a[7]'s value.
+            a[i] = subgroup.broadcast(a[i], qd.u32(7))
+
+    for i in range(N):
+        a[i] = i + 1000
+
+    foo()
+
+    for i in range(N):
+        assert a[i] == 1007
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_subgroup_broadcast_f32_amdgpu():
+    N = 64
+    a = qd.field(dtype=qd.f32, shape=N)
+
+    @qd.kernel
+    def foo():
+        qd.loop_config(block_dim=N)
+        for i in range(N):
+            a[i] = subgroup.broadcast(a[i], qd.u32(0))
+
+    for i in range(N):
+        a[i] = float(i) * 0.25 + 100.0
+
+    foo()
+
+    # Every lane should hold lane 0's value (= 0 * 0.25 + 100.0 = 100.0).
+    for i in range(N):
+        assert a[i] == approx(100.0, abs=1e-5)

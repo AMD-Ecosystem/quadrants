@@ -2446,6 +2446,17 @@ void TaskCodeGenLLVM::visit(ClearListStmt *stmt) {
 }
 
 void TaskCodeGenLLVM::visit(InternalFuncStmt *stmt) {
+  // Subgroup primitives have no cross-platform runtime stub; on AMDGPU we
+  // lower them to amdgcn intrinsics directly here. (On SPIR-V targets the
+  // SPIR-V codegen handles them; on CUDA, callers should use the typed
+  // qd.simt.warp.* ops, which do go through the generic runtime call path.)
+  if (current_arch() == Arch::amdgpu) {
+    if (auto *v = try_emit_amdgpu_subgroup_op(stmt)) {
+      llvm_val[stmt] = v;
+      return;
+    }
+  }
+
   std::vector<llvm::Value *> args;
 
   if (stmt->with_runtime_context)
@@ -2455,6 +2466,79 @@ void TaskCodeGenLLVM::visit(InternalFuncStmt *stmt) {
     args.push_back(llvm_val[s]);
   }
   llvm_val[stmt] = call(stmt->func_name, std::move(args));
+}
+
+llvm::Value *TaskCodeGenLLVM::try_emit_amdgpu_subgroup_op(
+    InternalFuncStmt *stmt) {
+  QD_ASSERT(current_arch() == Arch::amdgpu);
+#if defined(QD_WITH_AMDGPU)
+  const std::string &name = stmt->func_name;
+  const bool is_shuffle = (name == "subgroupShuffle");
+  const bool is_broadcast = (name == "subgroupBroadcast");
+  if (!is_shuffle && !is_broadcast) {
+    return nullptr;
+  }
+  // Both ops have signature (value, lane_idx) -> value.
+  QD_ASSERT(stmt->args.size() == 2);
+  llvm::Value *value = llvm_val[stmt->args[0]];
+  llvm::Value *lane_idx = llvm_val[stmt->args[1]];
+  llvm::Type *val_ty = value->getType();
+  auto *i32_ty = llvm::Type::getInt32Ty(*llvm_context);
+
+  // Restrict to 32-bit primitive value types in this PR. Wider types (i64,
+  // f64, vec3) would need component-wise decomposition; not yet exercised
+  // by any caller in Genesis, and easy to add as a follow-up when needed.
+  const unsigned val_bits = val_ty->getPrimitiveSizeInBits();
+  QD_ASSERT_INFO(
+      val_bits == 32,
+      "{} on AMDGPU currently supports only 32-bit primitive value types "
+      "(i32, u32, f32); got {} (size = {} bits). Bitcast to i32 / u32 at "
+      "the caller, or extend try_emit_amdgpu_subgroup_op to decompose.",
+      name, data_type_name(stmt->args[0]->ret_type), val_bits);
+
+  // subgroupBroadcast with a compile-time constant lane lowers to readlane,
+  // which is a single SALU op and faster than the bpermute round-trip.
+  // amdgcn.readlane is polymorphic on the value type (overloaded by val_ty).
+  if (is_broadcast) {
+    if (llvm::isa<llvm::ConstantInt>(lane_idx)) {
+      auto *lane_i32 = builder->CreateZExtOrTrunc(lane_idx, i32_ty);
+      return builder->CreateIntrinsic(llvm::Intrinsic::amdgcn_readlane,
+                                       {val_ty}, {value, lane_i32});
+    }
+    // Fall through to bpermute for runtime lane: semantically equivalent
+    // (readlane requires a uniform lane; runtime lane is not guaranteed
+    // uniform, so bpermute is the safe lowering).
+  }
+
+  // Bitcast value to i32 for ds_bpermute (which is fixed to i32).
+  llvm::Value *val_as_i32 =
+      (val_ty == i32_ty) ? value : builder->CreateBitCast(value, i32_ty);
+
+  // ds_bpermute reads from lane (idx >> 2), so the index argument must be
+  // pre-multiplied by 4 (one i32 per "addressable slot"). The high bits of
+  // lane_idx beyond log2(wave_size)=6 are masked off by the hardware, so
+  // we don't need to clamp explicitly; out-of-range lanes return the
+  // value of the calling lane.
+  auto *lane_i32 = builder->CreateZExtOrTrunc(lane_idx, i32_ty);
+  auto *idx_bytes =
+      builder->CreateShl(lane_i32, llvm::ConstantInt::get(i32_ty, 2));
+  llvm::Value *result_i32 = builder->CreateIntrinsic(
+      llvm::Intrinsic::amdgcn_ds_bpermute,
+      llvm::ArrayRef<llvm::Type *>{},
+      llvm::ArrayRef<llvm::Value *>{idx_bytes, val_as_i32});
+
+  // Bitcast back to the original value type.
+  if (result_i32->getType() == val_ty) {
+    return result_i32;
+  }
+  return builder->CreateBitCast(result_i32, val_ty);
+#else
+  // QD_WITH_AMDGPU off: arch should not be amdgpu in that build, but be
+  // defensive -- fall through to the generic call path (which will then
+  // fail with "function not found" and a clear error).
+  (void)stmt;
+  return nullptr;
+#endif
 }
 
 void TaskCodeGenLLVM::visit(AdStackAllocaStmt *stmt) {
