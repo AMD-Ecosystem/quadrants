@@ -1669,6 +1669,34 @@ void gpu_parallel_range_for(RuntimeContext *context,
     epilogue(context, tls_ptr);
 }
 
+#ifdef ARCH_amdgpu
+__attribute__((always_inline))
+void gpu_parallel_range_for_fixed_config(RuntimeContext *context,
+                                         int begin,
+                                         int end,
+                                         int fixed_block_dim,
+                                         int fixed_grid_dim,
+                                         range_for_xlogue prologue,
+                                         RangeForTaskFunc *func,
+                                         range_for_xlogue epilogue,
+                                         const std::size_t tls_size) {
+  int idx = thread_idx() + fixed_block_dim * block_idx() + begin;
+  // AMDGPU doesn't support dynamic array
+  // TODO: find a better way to set the tls_size (maybe like struct_for
+  alignas(8) char tls_buffer[64];
+  auto tls_ptr = &tls_buffer[0];
+  if (prologue)
+    prologue(context, tls_ptr);
+  const int stride = fixed_block_dim * fixed_grid_dim;
+  while (idx < end) {
+    func(context, tls_ptr, idx);
+    idx += stride;
+  }
+  if (epilogue)
+    epilogue(context, tls_ptr);
+}
+#endif
+
 struct mesh_task_helper_context {
   RuntimeContext *context;
   mesh_for_xlogue prologue{nullptr};
