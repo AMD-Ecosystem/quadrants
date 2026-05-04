@@ -72,5 +72,12 @@ PER_INTERNAL_OP(warp_barrier)
 // AMDGPU
 PER_INTERNAL_OP(amdgpu_clock_i64)
 
+// Wave-scope subgroup primitives (LLVM-runtime path; AMDGPU-implemented in
+// llvm_context.cpp via amdgcn.icmp/ballot intrinsics, no-op stubs on other
+// LLVM archs for now). i32-typed boolean variants distinct from the
+// polymorphic SPIRV `subgroupOr` / `subgroupAnd`.
+PER_INTERNAL_OP(subgroupOr_i32)
+PER_INTERNAL_OP(subgroupAnd_i32)
+
 // CPU
 PER_INTERNAL_OP(cpu_clock_i64)

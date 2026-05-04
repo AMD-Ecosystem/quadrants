@@ -1284,6 +1284,28 @@ int32 block_barrier_count_i32(int32 predicate) {
   return 0;
 }
 
+// Wave-scope subgroup primitives. Stubs here; rewritten at LLVM IR codegen
+// time by patch_intrinsic in llvm_context.cpp for each backend (CUDA/AMDGPU).
+// The Python frontend (qd.simt.subgroup.reduce_or / reduce_and) targets
+// these. Until 2026-05-04 these existed only on the SPIRV path (Vulkan/Metal)
+// — the LLVM-runtime archs (AMDGPU/CUDA/CPU) had no implementation.
+//
+// Semantics (v1, boolean-only): subgroupOr_i32(val) returns 1 if any active
+// lane in the wave has val != 0, else 0. subgroupAnd_i32 is the dual.
+// Generalising to bitwise OR/AND of arbitrary i32 values would need DPP-based
+// tree reduction; the boolean case is sufficient for wave-vote convergence
+// checks on the CG iter loop.
+int32 subgroupOr_i32(int32 val) {
+  return 0;
+}
+
+int32 subgroupAnd_i32(int32 val) {
+  return 0;
+}
+
+void subgroupBarrier() {
+}
+
 void warp_barrier(uint32 mask) {
 }
 

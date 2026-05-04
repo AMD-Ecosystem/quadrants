@@ -25,6 +25,28 @@ def any_true(cond):
     pass
 
 
+def reduce_or_i32(value):
+    """Wave-scope OR reduction (boolean): returns 1 if any active lane
+    in the wave has value != 0, else 0.
+
+    AMDGPU implementation: ``s_or_b64``-equivalent via ``amdgcn.icmp.i32``
+    ballot, single-instruction at the AMDGCN level after LLVM lowering.
+    See ``quadrants/runtime/llvm/llvm_context.cpp`` for the patcher.
+
+    Differs from the polymorphic ``reduce_or(value)`` (SPIRV-only at the
+    moment): this variant is i32-typed and treats input as boolean
+    (0 vs non-zero), sufficient for wave-vote convergence checks.
+    """
+    return impl.call_internal("subgroupOr_i32", value, with_runtime_context=False)
+
+
+def reduce_and_i32(value):
+    """Wave-scope AND reduction (boolean): returns 1 if all active lanes
+    in the wave have value != 0, else 0. See ``reduce_or_i32`` for context.
+    """
+    return impl.call_internal("subgroupAnd_i32", value, with_runtime_context=False)
+
+
 def all_equal(value):
     # TODO
     pass

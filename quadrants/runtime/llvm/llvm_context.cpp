@@ -582,7 +582,65 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
       patch_intrinsic("block_idx", llvm::Intrinsic::amdgcn_workgroup_id_x);
       patch_intrinsic("block_barrier", llvm::Intrinsic::amdgcn_s_barrier,
                       false);
+      // Wave-scope barrier (synonym for block_barrier on a wave-sized
+      // workgroup; on multi-wave workgroups it's an alias to s_barrier
+      // because AMDGPU doesn't expose a finer-grained intrinsic — the EXEC
+      // mask handles per-lane divergence within a wave automatically).
+      patch_intrinsic("subgroupBarrier", llvm::Intrinsic::amdgcn_s_barrier,
+                      false);
       patch_intrinsic("amdgpu_clock_i64", llvm::Intrinsic::amdgcn_s_memtime);
+
+      // Wave-scope OR/AND boolean reduction. Treats the input i32 as boolean
+      // (0 vs non-zero) and returns 1 if any/all active lanes have val!=0,
+      // else 0. Implemented via amdgcn.icmp.i32 which produces a wave-wide
+      // ballot mask (i64 on wave64 / i32 on wave32). Compares the ballot
+      // result against zero (for OR / "any") or against EXEC (for AND /
+      // "all"). Single-instruction-equivalent at the AMDGCN level
+      // (s_or_b64 / s_and_b64 with EXEC) once LLVM lowers it.
+      //
+      // v1 limitation: only the boolean case (sufficient for wave-vote
+      // convergence checks on the CG iter loop). Generalising to bitwise
+      // OR/AND of arbitrary i32 values needs DPP-based tree reduction.
+      auto patch_subgroup_bool_reduce = [&](std::string name, bool is_and) {
+        auto func = module->getFunction(name);
+        if (!func) {
+          return;
+        }
+        func->deleteBody();
+        auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+        IRBuilder<> builder(*ctx);
+        builder.SetInsertPoint(bb);
+        auto *arg = &*func->arg_begin();
+        auto *zero32 = llvm::ConstantInt::get(builder.getInt32Ty(), 0);
+        // amdgcn.icmp.i32(a, b, predicate) → i64 (on wave64) ballot mask.
+        // Predicate IDs match LLVM CmpInst::Predicate ordering:
+        //   CmpInst::ICMP_NE = 33  (used here to ballot lanes where arg!=0)
+        auto *icmp_ne = llvm::ConstantInt::get(builder.getInt32Ty(),
+                                               llvm::CmpInst::ICMP_NE);
+        llvm::Value *ballot = builder.CreateIntrinsic(
+            llvm::Intrinsic::amdgcn_icmp,
+            {builder.getInt64Ty(), builder.getInt32Ty()},
+            {arg, zero32, icmp_ne});
+        // For OR: result = (ballot != 0).
+        // For AND: result = (ballot == EXEC). Read EXEC via the readlane
+        // intrinsic isn't quite right; use amdgcn.read.exec instead.
+        llvm::Value *result_i1;
+        if (is_and) {
+          // EXEC mask of currently-active lanes (i64 on wave64).
+          auto *exec = builder.CreateIntrinsic(
+              llvm::Intrinsic::amdgcn_ballot,
+              {builder.getInt64Ty()},
+              {llvm::ConstantInt::getTrue(builder.getInt1Ty())});
+          result_i1 = builder.CreateICmpEQ(ballot, exec);
+        } else {
+          auto *zero64 = llvm::ConstantInt::get(builder.getInt64Ty(), 0);
+          result_i1 = builder.CreateICmpNE(ballot, zero64);
+        }
+        builder.CreateRet(builder.CreateZExt(result_i1, builder.getInt32Ty()));
+        QuadrantsLLVMContext::mark_inline(func);
+      };
+      patch_subgroup_bool_reduce("subgroupOr_i32", /*is_and=*/false);
+      patch_subgroup_bool_reduce("subgroupAnd_i32", /*is_and=*/true);
 
       auto patch_amdgpu_shfl_down = [&](std::string name, bool is_float,
                                         bool has_mask) {

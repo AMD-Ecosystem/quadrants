@@ -470,6 +470,95 @@ def test_block_sync():
         assert a[i] == N - 1
 
 
+# =====================================================================
+# AMDGPU-specific wave-scope subgroup primitives. Implemented via the
+# patch_intrinsic mechanism in quadrants/runtime/llvm/llvm_context.cpp,
+# emitting amdgcn.icmp / amdgcn.ballot for single-instruction-equivalent
+# wave reductions (s_or_b64 / s_and_b64 with EXEC after LLVM lowering).
+# =====================================================================
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_subgroup_reduce_or_i32_single_wave():
+    N = 64  # one wave on AMDGPU
+    inputs = qd.field(qd.i32, shape=(N,))
+    outputs = qd.field(qd.i32, shape=(N,))
+
+    @qd.kernel
+    def k():
+        qd.loop_config(block_dim=N)
+        for i in range(N):
+            outputs[i] = qd.simt.subgroup.reduce_or_i32(inputs[i])
+
+    # All zero → OR is 0 in every lane.
+    for i in range(N):
+        inputs[i] = 0
+    k()
+    for i in range(N):
+        assert outputs[i] == 0
+
+    # One lane non-zero → OR is 1 in every lane.
+    inputs[7] = 1
+    k()
+    for i in range(N):
+        assert outputs[i] == 1
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_subgroup_reduce_and_i32_single_wave():
+    N = 64
+    inputs = qd.field(qd.i32, shape=(N,))
+    outputs = qd.field(qd.i32, shape=(N,))
+
+    @qd.kernel
+    def k():
+        qd.loop_config(block_dim=N)
+        for i in range(N):
+            outputs[i] = qd.simt.subgroup.reduce_and_i32(inputs[i])
+
+    # All non-zero → AND is 1.
+    for i in range(N):
+        inputs[i] = 1
+    k()
+    for i in range(N):
+        assert outputs[i] == 1
+
+    # One lane zero → AND is 0.
+    inputs[31] = 0
+    k()
+    for i in range(N):
+        assert outputs[i] == 0
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_subgroup_reduce_or_i32_multi_wave():
+    """Verifies wave-scope semantics: with block_dim=128, two waves of 64
+    each must reduce independently. A single non-zero lane in wave 1 must
+    NOT propagate to wave 0's outputs.
+    """
+    N = 128
+    inputs = qd.field(qd.i32, shape=(N,))
+    outputs = qd.field(qd.i32, shape=(N,))
+
+    @qd.kernel
+    def k():
+        qd.loop_config(block_dim=N)
+        for i in range(N):
+            outputs[i] = qd.simt.subgroup.reduce_or_i32(inputs[i])
+
+    # Set lane 64 (wave 1's first lane) to 1, all others 0.
+    for i in range(N):
+        inputs[i] = 0
+    inputs[64] = 1
+    k()
+    # Wave 0 (lanes 0-63) sees no non-zero → OR=0.
+    for i in range(64):
+        assert outputs[i] == 0
+    # Wave 1 (lanes 64-127) sees the non-zero → OR=1 in every lane.
+    for i in range(64, N):
+        assert outputs[i] == 1
+
+
 # TODO: replace this with a stronger test case
 @test_utils.test(arch=qd.cuda)
 def test_grid_memfence():
