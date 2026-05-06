@@ -602,8 +602,8 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
       // block_dim=128 — wave 1 never reaches the barrier, so wave 0 hangs
       // forever waiting on it. wave_barrier has no such hazard because it
       // emits no actual hardware wait.
-      patch_intrinsic("subgroupBarrier",
-                      llvm::Intrinsic::amdgcn_wave_barrier, false);
+      patch_intrinsic("subgroupBarrier", llvm::Intrinsic::amdgcn_wave_barrier,
+                      false);
       patch_intrinsic("amdgpu_clock_i64", llvm::Intrinsic::amdgcn_s_memtime);
 
       // Wave-scope OR/AND boolean reduction. Treats the input i32 as boolean
