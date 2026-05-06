@@ -351,12 +351,31 @@
                   
   <section id="module-quadrants.lang.simt.subgroup">
 <span id="quadrants-lang-simt-subgroup"></span><h1>quadrants.lang.simt.subgroup<a class="headerlink" href="#module-quadrants.lang.simt.subgroup" title="Link to this heading">#</a></h1>
+<p>Wave-scope (a.k.a. SPIR-V “Subgroup”) primitives.</p>
+<p>Backend availability for the wave-scope reductions added in this module:</p>
+<ul class="simple">
+<li><p>AMDGPU: full implementation via <code class="docutils literal notranslate"><span class="pre">patch_intrinsic</span></code> (see
+<code class="docutils literal notranslate"><span class="pre">quadrants/runtime/llvm/llvm_context.cpp</span></code>); <code class="docutils literal notranslate"><span class="pre">reduce_or_i32</span></code> /
+<code class="docutils literal notranslate"><span class="pre">reduce_and_i32</span></code> lower to <code class="docutils literal notranslate"><span class="pre">amdgcn.icmp</span></code> + <code class="docutils literal notranslate"><span class="pre">amdgcn.ballot</span></code>
+(single-instruction-equivalent at AMDGCN level), and <code class="docutils literal notranslate"><span class="pre">barrier</span></code> lowers
+to <code class="docutils literal notranslate"><span class="pre">llvm.amdgcn.wave.barrier</span></code> (compiler + memory-ordering barrier
+scoped to the current wave; no hardware sync, no deadlock hazard on
+partial-wave participation).</p></li>
+<li><p>Other LLVM-runtime backends (CPU, CUDA today): no patcher yet —
+<code class="docutils literal notranslate"><span class="pre">reduce_or_i32</span></code> / <code class="docutils literal notranslate"><span class="pre">reduce_and_i32</span></code> fall through to the runtime stubs
+in <code class="docutils literal notranslate"><span class="pre">quadrants/runtime/llvm/runtime_module/runtime.cpp</span></code> which return 0.
+This is intentional placeholder behaviour for backends where wave-scope
+semantics aren’t wired up; callers that need cross-backend portability
+should gate on <code class="docutils literal notranslate"><span class="pre">qd.cfg.arch</span> <span class="pre">==</span> <span class="pre">qd.amdgpu</span></code> for now.</p></li>
+<li><p>SPIR-V backends (Vulkan, Metal): the polymorphic <code class="docutils literal notranslate"><span class="pre">reduce_or</span></code> /
+<code class="docutils literal notranslate"><span class="pre">reduce_and</span></code> (no <code class="docutils literal notranslate"><span class="pre">_i32</span></code> suffix) cover those targets.</p></li>
+</ul>
 <section id="functions">
 <h2>Functions<a class="headerlink" href="#functions" title="Link to this heading">#</a></h2>
 <div class="pst-scrollable-table-container"><table class="autosummary longtable table autosummary">
 <tbody>
 <tr class="row-odd"><td><p><a class="reference internal" href="#quadrants.lang.simt.subgroup.barrier" title="quadrants.lang.simt.subgroup.barrier"><code class="xref py py-obj docutils literal notranslate"><span class="pre">barrier</span></code></a>()</p></td>
-<td><p></p></td>
+<td><p>Wave-scope (subgroup) execution + memory-ordering barrier.</p></td>
 </tr>
 <tr class="row-even"><td><p><a class="reference internal" href="#quadrants.lang.simt.subgroup.memory_barrier" title="quadrants.lang.simt.subgroup.memory_barrier"><code class="xref py py-obj docutils literal notranslate"><span class="pre">memory_barrier</span></code></a>()</p></td>
 <td><p></p></td>
@@ -369,6 +388,12 @@
 </tr>
 <tr class="row-odd"><td><p><a class="reference internal" href="#quadrants.lang.simt.subgroup.any_true" title="quadrants.lang.simt.subgroup.any_true"><code class="xref py py-obj docutils literal notranslate"><span class="pre">any_true</span></code></a>(cond)</p></td>
 <td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#quadrants.lang.simt.subgroup.reduce_or_i32" title="quadrants.lang.simt.subgroup.reduce_or_i32"><code class="xref py py-obj docutils literal notranslate"><span class="pre">reduce_or_i32</span></code></a>(value)</p></td>
+<td><p>Wave-scope OR reduction (boolean): returns 1 if any active lane</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#quadrants.lang.simt.subgroup.reduce_and_i32" title="quadrants.lang.simt.subgroup.reduce_and_i32"><code class="xref py py-obj docutils literal notranslate"><span class="pre">reduce_and_i32</span></code></a>(value)</p></td>
+<td><p>Wave-scope AND reduction (boolean): returns 1 if all active lanes</p></td>
 </tr>
 <tr class="row-even"><td><p><a class="reference internal" href="#quadrants.lang.simt.subgroup.all_equal" title="quadrants.lang.simt.subgroup.all_equal"><code class="xref py py-obj docutils literal notranslate"><span class="pre">all_equal</span></code></a>(value)</p></td>
 <td><p></p></td>
@@ -460,7 +485,14 @@
 <dl class="py function">
 <dt class="sig sig-object py" id="quadrants.lang.simt.subgroup.barrier">
 <span class="sig-prename descclassname"><span class="pre">quadrants.lang.simt.subgroup.</span></span><span class="sig-name descname"><span class="pre">barrier</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/quadrants/lang/simt/subgroup.html#barrier"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#quadrants.lang.simt.subgroup.barrier" title="Link to this definition">#</a></dt>
-<dd></dd></dl>
+<dd><p>Wave-scope (subgroup) execution + memory-ordering barrier.</p>
+<p>On AMDGPU lowers to <code class="docutils literal notranslate"><span class="pre">llvm.amdgcn.wave.barrier</span></code>: no hardware wait
+(all 64 lanes of an AMDGPU wave already execute in lockstep) but
+prevents the compiler from reordering memory ops or moving
+convergent ops across this point. Safe to call from non-uniform
+control flow — does NOT synchronize across waves in a workgroup.
+For workgroup-scope synchronization use <code class="docutils literal notranslate"><span class="pre">qd.simt.block.sync()</span></code>.</p>
+</dd></dl>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="quadrants.lang.simt.subgroup.memory_barrier">
@@ -481,6 +513,26 @@
 <dt class="sig sig-object py" id="quadrants.lang.simt.subgroup.any_true">
 <span class="sig-prename descclassname"><span class="pre">quadrants.lang.simt.subgroup.</span></span><span class="sig-name descname"><span class="pre">any_true</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">cond</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/quadrants/lang/simt/subgroup.html#any_true"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#quadrants.lang.simt.subgroup.any_true" title="Link to this definition">#</a></dt>
 <dd></dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="quadrants.lang.simt.subgroup.reduce_or_i32">
+<span class="sig-prename descclassname"><span class="pre">quadrants.lang.simt.subgroup.</span></span><span class="sig-name descname"><span class="pre">reduce_or_i32</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/quadrants/lang/simt/subgroup.html#reduce_or_i32"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#quadrants.lang.simt.subgroup.reduce_or_i32" title="Link to this definition">#</a></dt>
+<dd><p>Wave-scope OR reduction (boolean): returns 1 if any active lane
+in the wave has value != 0, else 0.</p>
+<p>AMDGPU implementation: <code class="docutils literal notranslate"><span class="pre">s_or_b64</span></code>-equivalent via <code class="docutils literal notranslate"><span class="pre">amdgcn.icmp.i32</span></code>
+ballot, single-instruction at the AMDGCN level after LLVM lowering.
+See <code class="docutils literal notranslate"><span class="pre">quadrants/runtime/llvm/llvm_context.cpp</span></code> for the patcher.</p>
+<p>Differs from the polymorphic <code class="docutils literal notranslate"><span class="pre">reduce_or(value)</span></code> (SPIRV-only at the
+moment): this variant is i32-typed and treats input as boolean
+(0 vs non-zero), sufficient for wave-vote convergence checks.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="quadrants.lang.simt.subgroup.reduce_and_i32">
+<span class="sig-prename descclassname"><span class="pre">quadrants.lang.simt.subgroup.</span></span><span class="sig-name descname"><span class="pre">reduce_and_i32</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/quadrants/lang/simt/subgroup.html#reduce_and_i32"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#quadrants.lang.simt.subgroup.reduce_and_i32" title="Link to this definition">#</a></dt>
+<dd><p>Wave-scope AND reduction (boolean): returns 1 if all active lanes
+in the wave have value != 0, else 0. See <code class="docutils literal notranslate"><span class="pre">reduce_or_i32</span></code> for context.</p>
+</dd></dl>
 
 <dl class="py function">
 <dt class="sig sig-object py" id="quadrants.lang.simt.subgroup.all_equal">
@@ -674,6 +726,8 @@
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.simt.subgroup.elect"><code class="docutils literal notranslate"><span class="pre">elect()</span></code></a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.simt.subgroup.all_true"><code class="docutils literal notranslate"><span class="pre">all_true()</span></code></a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.simt.subgroup.any_true"><code class="docutils literal notranslate"><span class="pre">any_true()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.simt.subgroup.reduce_or_i32"><code class="docutils literal notranslate"><span class="pre">reduce_or_i32()</span></code></a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.simt.subgroup.reduce_and_i32"><code class="docutils literal notranslate"><span class="pre">reduce_and_i32()</span></code></a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.simt.subgroup.all_equal"><code class="docutils literal notranslate"><span class="pre">all_equal()</span></code></a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.simt.subgroup.broadcast_first"><code class="docutils literal notranslate"><span class="pre">broadcast_first()</span></code></a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#quadrants.lang.simt.subgroup.reduce_add"><code class="docutils literal notranslate"><span class="pre">reduce_add()</span></code></a></li>

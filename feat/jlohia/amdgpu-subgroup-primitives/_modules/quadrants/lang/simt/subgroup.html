@@ -318,6 +318,26 @@
                   
   <h1>Source code for quadrants.lang.simt.subgroup</h1><div class="highlight"><pre>
 <span></span><span class="c1"># type: ignore</span>
+<span class="sd">&quot;&quot;&quot;Wave-scope (a.k.a. SPIR-V &quot;Subgroup&quot;) primitives.</span>
+
+<span class="sd">Backend availability for the wave-scope reductions added in this module:</span>
+
+<span class="sd">- AMDGPU: full implementation via ``patch_intrinsic`` (see</span>
+<span class="sd">  ``quadrants/runtime/llvm/llvm_context.cpp``); ``reduce_or_i32`` /</span>
+<span class="sd">  ``reduce_and_i32`` lower to ``amdgcn.icmp`` + ``amdgcn.ballot``</span>
+<span class="sd">  (single-instruction-equivalent at AMDGCN level), and ``barrier`` lowers</span>
+<span class="sd">  to ``llvm.amdgcn.wave.barrier`` (compiler + memory-ordering barrier</span>
+<span class="sd">  scoped to the current wave; no hardware sync, no deadlock hazard on</span>
+<span class="sd">  partial-wave participation).</span>
+<span class="sd">- Other LLVM-runtime backends (CPU, CUDA today): no patcher yet —</span>
+<span class="sd">  ``reduce_or_i32`` / ``reduce_and_i32`` fall through to the runtime stubs</span>
+<span class="sd">  in ``quadrants/runtime/llvm/runtime_module/runtime.cpp`` which return 0.</span>
+<span class="sd">  This is intentional placeholder behaviour for backends where wave-scope</span>
+<span class="sd">  semantics aren&#39;t wired up; callers that need cross-backend portability</span>
+<span class="sd">  should gate on ``qd.cfg.arch == qd.amdgpu`` for now.</span>
+<span class="sd">- SPIR-V backends (Vulkan, Metal): the polymorphic ``reduce_or`` /</span>
+<span class="sd">  ``reduce_and`` (no ``_i32`` suffix) cover those targets.</span>
+<span class="sd">&quot;&quot;&quot;</span>
 
 <span class="kn">from</span><span class="w"> </span><span class="nn">quadrants.lang</span><span class="w"> </span><span class="kn">import</span> <span class="n">impl</span>
 
@@ -325,6 +345,15 @@
 <div class="viewcode-block" id="barrier">
 <a class="viewcode-back" href="../../../../autoapi/quadrants/lang/simt/subgroup/index.html#quadrants.lang.simt.subgroup.barrier">[docs]</a>
 <span class="k">def</span><span class="w"> </span><span class="nf">barrier</span><span class="p">():</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Wave-scope (subgroup) execution + memory-ordering barrier.</span>
+
+<span class="sd">    On AMDGPU lowers to ``llvm.amdgcn.wave.barrier``: no hardware wait</span>
+<span class="sd">    (all 64 lanes of an AMDGPU wave already execute in lockstep) but</span>
+<span class="sd">    prevents the compiler from reordering memory ops or moving</span>
+<span class="sd">    convergent ops across this point. Safe to call from non-uniform</span>
+<span class="sd">    control flow — does NOT synchronize across waves in a workgroup.</span>
+<span class="sd">    For workgroup-scope synchronization use ``qd.simt.block.sync()``.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
     <span class="k">return</span> <span class="n">impl</span><span class="o">.</span><span class="n">call_internal</span><span class="p">(</span><span class="s2">&quot;subgroupBarrier&quot;</span><span class="p">,</span> <span class="n">with_runtime_context</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></div>
 
 
@@ -359,6 +388,8 @@
 
 
 
+<div class="viewcode-block" id="reduce_or_i32">
+<a class="viewcode-back" href="../../../../autoapi/quadrants/lang/simt/subgroup/index.html#quadrants.lang.simt.subgroup.reduce_or_i32">[docs]</a>
 <span class="k">def</span><span class="w"> </span><span class="nf">reduce_or_i32</span><span class="p">(</span><span class="n">value</span><span class="p">):</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Wave-scope OR reduction (boolean): returns 1 if any active lane</span>
 <span class="sd">    in the wave has value != 0, else 0.</span>
@@ -371,14 +402,18 @@
 <span class="sd">    moment): this variant is i32-typed and treats input as boolean</span>
 <span class="sd">    (0 vs non-zero), sufficient for wave-vote convergence checks.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
-    <span class="k">return</span> <span class="n">impl</span><span class="o">.</span><span class="n">call_internal</span><span class="p">(</span><span class="s2">&quot;subgroupOr_i32&quot;</span><span class="p">,</span> <span class="n">value</span><span class="p">,</span> <span class="n">with_runtime_context</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">impl</span><span class="o">.</span><span class="n">call_internal</span><span class="p">(</span><span class="s2">&quot;subgroupOr_i32&quot;</span><span class="p">,</span> <span class="n">value</span><span class="p">,</span> <span class="n">with_runtime_context</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></div>
 
 
+
+<div class="viewcode-block" id="reduce_and_i32">
+<a class="viewcode-back" href="../../../../autoapi/quadrants/lang/simt/subgroup/index.html#quadrants.lang.simt.subgroup.reduce_and_i32">[docs]</a>
 <span class="k">def</span><span class="w"> </span><span class="nf">reduce_and_i32</span><span class="p">(</span><span class="n">value</span><span class="p">):</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Wave-scope AND reduction (boolean): returns 1 if all active lanes</span>
 <span class="sd">    in the wave have value != 0, else 0. See ``reduce_or_i32`` for context.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
-    <span class="k">return</span> <span class="n">impl</span><span class="o">.</span><span class="n">call_internal</span><span class="p">(</span><span class="s2">&quot;subgroupAnd_i32&quot;</span><span class="p">,</span> <span class="n">value</span><span class="p">,</span> <span class="n">with_runtime_context</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">impl</span><span class="o">.</span><span class="n">call_internal</span><span class="p">(</span><span class="s2">&quot;subgroupAnd_i32&quot;</span><span class="p">,</span> <span class="n">value</span><span class="p">,</span> <span class="n">with_runtime_context</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></div>
+
 
 
 <div class="viewcode-block" id="all_equal">
@@ -605,7 +640,9 @@
     <span class="s2">&quot;reduce_min&quot;</span><span class="p">,</span>
     <span class="s2">&quot;reduce_max&quot;</span><span class="p">,</span>
     <span class="s2">&quot;reduce_and&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;reduce_and_i32&quot;</span><span class="p">,</span>
     <span class="s2">&quot;reduce_or&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;reduce_or_i32&quot;</span><span class="p">,</span>
     <span class="s2">&quot;reduce_xor&quot;</span><span class="p">,</span>
     <span class="s2">&quot;inclusive_add&quot;</span><span class="p">,</span>
     <span class="s2">&quot;inclusive_mul&quot;</span><span class="p">,</span>
