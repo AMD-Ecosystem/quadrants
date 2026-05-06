@@ -582,12 +582,28 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
       patch_intrinsic("block_idx", llvm::Intrinsic::amdgcn_workgroup_id_x);
       patch_intrinsic("block_barrier", llvm::Intrinsic::amdgcn_s_barrier,
                       false);
-      // Wave-scope barrier (synonym for block_barrier on a wave-sized
-      // workgroup; on multi-wave workgroups it's an alias to s_barrier
-      // because AMDGPU doesn't expose a finer-grained intrinsic — the EXEC
-      // mask handles per-lane divergence within a wave automatically).
-      patch_intrinsic("subgroupBarrier", llvm::Intrinsic::amdgcn_s_barrier,
-                      false);
+      // Wave-scope subgroup barrier — matches SPIR-V OpControlBarrier with
+      // Subgroup execution scope. Lowers to llvm.amdgcn.wave.barrier, a
+      // discardable barrier that carries IntrConvergent + IntrHasSideEffects:
+      //   - IntrConvergent prevents the compiler from hoisting/sinking
+      //     convergent ops (v_readfirstlane, ds_swizzle, ballots, the
+      //     subgroupOr/subgroupAnd primitives below) across this point
+      //     or moving them in/out of divergent control flow.
+      //   - IntrHasSideEffects prevents memory-op reordering across it.
+      // No hardware barrier instruction is emitted: the 64 lanes of an
+      // AMDGPU wave already execute in lockstep, so there is nothing for
+      // the hardware to wait on. See LLVM IntrinsicsAMDGPU.td:
+      //   def int_amdgcn_wave_barrier ...
+      //
+      // We deliberately do NOT use amdgcn_s_barrier here. s_barrier is the
+      // workgroup-scope barrier (waits for every wave in the workgroup to
+      // arrive) and would deadlock on partial-wave participation, e.g.
+      // calling qd.simt.subgroup.barrier() inside `if lane < 64:` with
+      // block_dim=128 — wave 1 never reaches the barrier, so wave 0 hangs
+      // forever waiting on it. wave_barrier has no such hazard because it
+      // emits no actual hardware wait.
+      patch_intrinsic("subgroupBarrier",
+                      llvm::Intrinsic::amdgcn_wave_barrier, false);
       patch_intrinsic("amdgpu_clock_i64", llvm::Intrinsic::amdgcn_s_memtime);
 
       // Wave-scope OR/AND boolean reduction. Treats the input i32 as boolean

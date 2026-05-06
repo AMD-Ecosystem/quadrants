@@ -559,6 +559,68 @@ def test_subgroup_reduce_or_i32_multi_wave():
         assert outputs[i] == 1
 
 
+@test_utils.test(arch=qd.amdgpu)
+def test_subgroup_barrier_partial_participation():
+    """Regression test for the s_barrier-vs-wave_barrier fix.
+
+    On AMDGPU, subgroupBarrier() must lower to llvm.amdgcn.wave.barrier
+    (wave-scope, no hardware sync) and NOT to llvm.amdgcn.s.barrier
+    (workgroup-scope, waits for every wave to arrive). Calling a
+    workgroup-scope barrier from non-uniform control flow with
+    block_dim > wave_size deadlocks the workgroup, because non-
+    participating waves never reach the barrier.
+
+    The kernel below uses block_dim=128 (two wave64 waves) and only
+    calls subgroupBarrier() on the first half of lanes (i < 64, i.e.
+    only wave 0). With s_barrier this hangs forever; with wave.barrier
+    it completes and the assertions verify that the kernel produced
+    the correct result.
+    """
+    N = 128  # 2 waves of 64
+    out = qd.field(qd.i32, shape=(N,))
+
+    @qd.kernel
+    def k():
+        qd.loop_config(block_dim=N)
+        for i in range(N):
+            if i < 64:
+                # Only wave 0 hits this barrier. Workgroup-scope
+                # s_barrier would deadlock here; wave.barrier is safe.
+                qd.simt.subgroup.barrier()
+                out[i] = 1
+            else:
+                out[i] = 2
+
+    k()
+    for i in range(64):
+        assert out[i] == 1
+    for i in range(64, N):
+        assert out[i] == 2
+
+
+@test_utils.test(arch=qd.amdgpu)
+def test_subgroup_barrier_in_uniform_path():
+    """subgroupBarrier called by every lane in every wave — should
+    behave the same as the partial-participation variant (no hardware
+    sync, just compiler + memory ordering)."""
+    N = 128
+    out = qd.field(qd.i32, shape=(N,))
+
+    @qd.kernel
+    def k():
+        qd.loop_config(block_dim=N)
+        for i in range(N):
+            out[i] = i
+            qd.simt.subgroup.barrier()
+            # Read-after-write within the same lane: barrier prevents
+            # the compiler from reordering the store and load across it.
+            out[i] = out[i] * 2
+
+    k()
+    for i in range(N):
+        assert out[i] == 2 * i
+
+
 # TODO: replace this with a stronger test case
 @test_utils.test(arch=qd.cuda)
 def test_grid_memfence():
