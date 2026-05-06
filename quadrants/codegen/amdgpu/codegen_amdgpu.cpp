@@ -399,7 +399,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       // tagging and confuses InferAddressSpaces.
       auto *byte_ptr = builder->CreateBitCast(
           origin_ptr, llvm::PointerType::get(
-              llvm::Type::getInt8Ty(*llvm_context), origin_as));
+                          llvm::Type::getInt8Ty(*llvm_context), origin_as));
       auto *address_offset = builder->CreateSExt(
           llvm_val[stmt->offset], llvm::Type::getInt64Ty(*llvm_context));
       auto *offset_ptr = builder->CreateGEP(
