@@ -606,13 +606,45 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
                       false);
       patch_intrinsic("amdgpu_clock_i64", llvm::Intrinsic::amdgcn_s_memtime);
 
+      // Determine the AMDGPU wave (subgroup) size for the current target.
+      // The wave-vote ballot intrinsics return an i32 mask on wave32 targets
+      // (RDNA, expected MI450) and an i64 mask on wave64 targets (CDNA1/2/3
+      // — gfx9xx). Pick the type from the function's `target-features`
+      // attribute first; if not set, fall back to the mcpu-based default.
+      //
+      // Per Dipto's review on PR #26: keep this predicated on wavesize so
+      // the lowering is upstream-friendly (the community cares about RDNA,
+      // all wave32) and forward-compatible with MI450.
+      auto get_amdgpu_wave_size = [](llvm::Function *F) -> unsigned {
+        auto fn_attrs = F->getAttributes().getFnAttrs();
+        if (fn_attrs.hasAttribute("target-features")) {
+          auto feats =
+              fn_attrs.getAttribute("target-features").getValueAsString();
+          if (feats.contains("+wavefrontsize32"))
+            return 32;
+          if (feats.contains("+wavefrontsize64"))
+            return 64;
+        }
+#if defined(QD_WITH_AMDGPU)
+        // Quadrants's AMDGPU codegen path sets target-features to "" and
+        // relies on the mcpu default. gfx9xx (CDNA1/2/3) is wave64 by
+        // default; gfx10xx+ (RDNA, future CDNA-Next) is wave32 by default.
+        const std::string &mcpu = AMDGPUContext::get_instance().get_mcpu();
+        if (mcpu.size() >= 4 && mcpu[3] == '9')
+          return 64;
+        return 32;
+#else
+        return 64;
+#endif
+      };
+
       // Wave-scope OR/AND boolean reduction. Treats the input i32 as boolean
       // (0 vs non-zero) and returns 1 if any/all active lanes have val!=0,
       // else 0. Implemented via amdgcn.icmp.i32 which produces a wave-wide
       // ballot mask (i64 on wave64 / i32 on wave32). Compares the ballot
       // result against zero (for OR / "any") or against EXEC (for AND /
       // "all"). Single-instruction-equivalent at the AMDGCN level
-      // (s_or_b64 / s_and_b64 with EXEC) once LLVM lowers it.
+      // (s_or_b{32,64} / s_and_b{32,64} with EXEC) once LLVM lowers it.
       //
       // v1 limitation: only the boolean case (sufficient for wave-vote
       // convergence checks on the CG iter loop). Generalising to bitwise
@@ -628,29 +660,37 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
         builder.SetInsertPoint(bb);
         auto *arg = &*func->arg_begin();
         auto *zero32 = llvm::ConstantInt::get(builder.getInt32Ty(), 0);
-        // amdgcn.icmp.i32(a, b, predicate) → i64 (on wave64) ballot mask.
+
+        // Pick the ballot mask type to match the wave size of the target.
+        // amdgcn.icmp / amdgcn.ballot are overloaded by their return type;
+        // the type MUST match the subtarget's wave size or codegen will
+        // either fail to lower or produce wrong results.
+        unsigned wave_size = get_amdgpu_wave_size(func);
+        llvm::Type *mask_ty =
+            (wave_size == 64) ? builder.getInt64Ty() : builder.getInt32Ty();
+
+        // amdgcn.icmp.i32(a, b, predicate) → mask_ty ballot mask.
         // Predicate IDs match LLVM CmpInst::Predicate ordering:
-        //   CmpInst::ICMP_NE = 33  (used here to ballot lanes where arg!=0)
+        //   CmpInst::ICMP_NE  (used here to ballot lanes where arg!=0)
         auto *icmp_ne = llvm::ConstantInt::get(builder.getInt32Ty(),
                                                llvm::CmpInst::ICMP_NE);
         llvm::Value *ballot = builder.CreateIntrinsic(
-            llvm::Intrinsic::amdgcn_icmp,
-            {builder.getInt64Ty(), builder.getInt32Ty()},
+            llvm::Intrinsic::amdgcn_icmp, {mask_ty, builder.getInt32Ty()},
             {arg, zero32, icmp_ne});
-        // For OR: result = (ballot != 0).
-        // For AND: result = (ballot == EXEC). Read EXEC via the readlane
-        // intrinsic isn't quite right; use amdgcn.read.exec instead.
+
+        // For OR ("any"): result = (ballot != 0).
+        // For AND ("all"): result = (ballot == EXEC), where EXEC is read
+        //                  via amdgcn.ballot of `true` (the canonical idiom
+        //                  for "currently-active lane mask").
         llvm::Value *result_i1;
         if (is_and) {
-          // EXEC mask of currently-active lanes (i64 on wave64).
           auto *exec = builder.CreateIntrinsic(
-              llvm::Intrinsic::amdgcn_ballot,
-              {builder.getInt64Ty()},
+              llvm::Intrinsic::amdgcn_ballot, {mask_ty},
               {llvm::ConstantInt::getTrue(builder.getInt1Ty())});
           result_i1 = builder.CreateICmpEQ(ballot, exec);
         } else {
-          auto *zero64 = llvm::ConstantInt::get(builder.getInt64Ty(), 0);
-          result_i1 = builder.CreateICmpNE(ballot, zero64);
+          auto *mask_zero = llvm::ConstantInt::get(mask_ty, 0);
+          result_i1 = builder.CreateICmpNE(ballot, mask_zero);
         }
         builder.CreateRet(builder.CreateZExt(result_i1, builder.getInt32Ty()));
         QuadrantsLLVMContext::mark_inline(func);
