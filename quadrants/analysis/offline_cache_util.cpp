@@ -24,8 +24,7 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_parameter_list(
   return serializer.data;
 }
 
-static std::vector<std::uint8_t> get_offline_cache_key_of_rets(
-    const std::vector<CallableBase::Ret> &ret_list) {
+static std::vector<std::uint8_t> get_offline_cache_key_of_rets(const std::vector<CallableBase::Ret> &ret_list) {
   BinaryOutputSerializer serializer;
   serializer.initialize();
   serializer(ret_list);
@@ -33,8 +32,7 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_rets(
   return serializer.data;
 }
 
-static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
-    const CompileConfig &config) {
+static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(const CompileConfig &config) {
   BinaryOutputSerializer serializer;
   serializer.initialize();
   serializer(config.arch);
@@ -64,8 +62,9 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
     serializer(config.saturating_grid_dim);
     serializer(config.cpu_max_num_threads);
   }
+  serializer(config.ad_stack_experimental_enabled);
   serializer(config.ad_stack_size);
-  serializer(config.default_ad_stack_size);
+  serializer(config.ad_stack_sparse_threshold_bytes);
   serializer(config.random_seed);
   serializer(config.make_mesh_block_local);
   serializer(config.optimize_mesh_reordered_mapping);
@@ -83,8 +82,7 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
   return serializer.data;
 }
 
-static std::vector<std::uint8_t> get_offline_cache_key_of_device_caps(
-    const DeviceCapabilityConfig &caps) {
+static std::vector<std::uint8_t> get_offline_cache_key_of_device_caps(const DeviceCapabilityConfig &caps) {
   BinaryOutputSerializer serializer;
   serializer.initialize();
   serializer(caps.devcaps);
@@ -92,10 +90,9 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_device_caps(
   return serializer.data;
 }
 
-static void get_offline_cache_key_of_snode_impl(
-    const SNode *snode,
-    BinaryOutputSerializer &serializer,
-    std::unordered_set<int> &visited) {
+static void get_offline_cache_key_of_snode_impl(const SNode *snode,
+                                                BinaryOutputSerializer &serializer,
+                                                std::unordered_set<int> &visited) {
   if (auto iter = visited.find(snode->id); iter != visited.end()) {
     serializer(snode->id);  // Use snode->id as placeholder to identify a snode
     return;
@@ -171,8 +168,7 @@ std::string get_hashed_offline_cache_key(const CompileConfig &config,
   std::vector<std::uint8_t> kernel_params_string, kernel_rets_string;
   std::string kernel_body_string;
   if (kernel) {  // param_list, rets, body
-    kernel_params_string =
-        get_offline_cache_key_of_parameter_list(kernel->parameter_list);
+    kernel_params_string = get_offline_cache_key_of_parameter_list(kernel->parameter_list);
     kernel_rets_string = get_offline_cache_key_of_rets(kernel->rets);
     std::ostringstream oss;
     gen_offline_cache_key(kernel->ir.get(), &oss);
@@ -181,8 +177,7 @@ std::string get_hashed_offline_cache_key(const CompileConfig &config,
 
   auto compile_config_key = get_offline_cache_key_of_compile_config(config);
   auto device_caps_key = get_offline_cache_key_of_device_caps(caps);
-  std::string autodiff_mode =
-      std::to_string(static_cast<std::size_t>(kernel->autodiff_mode));
+  std::string autodiff_mode = std::to_string(static_cast<std::size_t>(kernel->autodiff_mode));
   // fn_attrs (set via @qd.kernel(fn_attrs=...)) affect codegen and must
   // participate in the cache key, otherwise two kernels with identical IR
   // but different attribute values collide. Iterate in sorted order so the

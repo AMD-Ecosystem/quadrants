@@ -1,5 +1,6 @@
 import argparse
 import atexit
+import importlib.util
 import os
 import shutil
 import tempfile
@@ -37,7 +38,23 @@ def _test_python(args, default_dir="python"):
         pytest_args += ["--reruns", args.rerun]
     try:
         if args.coverage:
-            pytest_args += ["--cov-branch", "--cov=python/quadrants"]
+            os.environ.setdefault("QD_KERNEL_COVERAGE", "1")
+            os.environ["_QD_KCOV_ARC"] = "1"
+            _spec = importlib.util.find_spec("quadrants")
+            assert _spec is not None and _spec.origin is not None, "quadrants package not found"
+            _cov_src = os.path.dirname(_spec.origin)
+            # Disable the quadrants pytest plugin (pytest11 entry point) during coverage runs.  Loading the plugin
+            # forces Python to import the quadrants parent package before pytest-cov starts measuring, so module-level
+            # code (imports, def lines, etc.) appears uncovered.  The plugin is still useful for *external* users who
+            # run `pytest --cov` on their own code — they don't measure quadrants' own coverage.  We replicate the
+            # plugin's env-var setup (QD_KERNEL_COVERAGE, _QD_KCOV_ARC) above.
+            pytest_args += [
+                "--cov-branch",
+                f"--cov={_cov_src}",
+                f"--cov={test_dir}",
+                "-p",
+                "no:quadrants",
+            ]
         if args.cov_append:
             pytest_args += ["--cov-append"]
         if args.keys:
@@ -48,9 +65,19 @@ def _test_python(args, default_dir="python"):
             pytest_args += ["--failed-first"]
         if args.fail_fast:
             pytest_args += ["--exitfirst"]
+        elif args.maxfail > 0:
+            pytest_args += [f"--maxfail={args.maxfail}"]
         if args.timeout > 0:
             pytest_args += [
                 "--durations=15",
+                # Suppress stock pytest-timeout if installed — it conflicts
+                # with pytest_hardtle (both register the same hook specs).
+                "-p",
+                "no:timeout",
+                # pytest_hardtle uses a CFFI-compiled C watchdog that calls
+                # _exit(1) from a native signal handler, so it can kill tests
+                # hung in native GPU calls even when the GIL is held.
+                # Stock pytest-timeout's signal method cannot do this.
                 "-p",
                 "pytest_hardtle",
                 f"--timeout={args.timeout}",
@@ -149,6 +176,14 @@ def test():
         dest="fail_fast",
         action="store_true",
         help="Exit instantly on the first failed test",
+    )
+    parser.add_argument(
+        "--maxfail",
+        required=False,
+        default=20,
+        type=int,
+        dest="maxfail",
+        help="Stop after this many test failures (default: 20, 0 = no limit)",
     )
     parser.add_argument(
         "-C",

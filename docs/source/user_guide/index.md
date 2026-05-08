@@ -17,7 +17,10 @@ supported_systems
 tensor_types
 scalar_tensors
 matrix_vector
+decompositions
+tensor
 compound_types
+buffer_view
 static
 sub_functions
 parallelization
@@ -29,6 +32,28 @@ parallelization
 :titlesonly:
 
 interop
+metal_shared_queue
+```
+
+```{toctree}
+:caption: Autodiff
+:maxdepth: 1
+:titlesonly:
+
+autodiff
+```
+
+```{toctree}
+:caption: SIMT primitives
+:maxdepth: 1
+:titlesonly:
+
+atomics
+block
+grid
+math
+subgroup
+tile16
 ```
 
 ```{toctree}
@@ -36,8 +61,18 @@ interop
 :maxdepth: 1
 :titlesonly:
 
-cuda_graph
+fastcache
+graph
 perf_dispatch
+init_options
+```
+
+```{toctree}
+:caption: Testing
+:maxdepth: 1
+:titlesonly:
+
+kernel_coverage
 ```
 
 ```{toctree}
@@ -50,4 +85,20 @@ python_backend
 debug
 quirks
 troubleshooting
+```
+
+```{toctree}
+:caption: Contributing
+:maxdepth: 1
+:titlesonly:
+
+contributing
+```
+
+```{toctree}
+:caption: Internal
+:maxdepth: 1
+:titlesonly:
+
+building_cudagraph_conditional_fatbin
 ```

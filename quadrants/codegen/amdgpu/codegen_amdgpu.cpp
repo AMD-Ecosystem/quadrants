@@ -37,13 +37,9 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       : TaskCodeGenLLVM(id, config, tlctx, kernel, ir) {
   }
 
-  llvm::Value *create_print(std::string tag,
-                            DataType dt,
-                            llvm::Value *value) override{QD_NOT_IMPLEMENTED}
+  llvm::Value *create_print(std::string tag, DataType dt, llvm::Value *value) override{QD_NOT_IMPLEMENTED}
 
-  std::tuple<llvm::Value *, llvm::Type *> create_value_and_type(
-      llvm::Value *value,
-      DataType dt) {
+  std::tuple<llvm::Value *, llvm::Type *> create_value_and_type(llvm::Value *value, DataType dt) {
     QD_NOT_IMPLEMENTED
   }
 
@@ -122,6 +118,8 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
         auto lshr = builder->CreateLShr(sub, 31);
         llvm_val[stmt] = builder->CreateOr(ashr, lshr);
       } else if (input_quadrants_type->is_primitive(PrimitiveTypeID::f32)) {
+        // Branchless select-based sgn replaces the original branching alloca/CFG implementation.
+        // Same semantics (sgn(0) == 0, sgn(<0) == -1, sgn(>0) == 1) without scratch memory.
         auto *float_ty = llvm::Type::getFloatTy(*llvm_context);
         auto *zero = llvm::ConstantFP::get(float_ty, 0.0);
         auto *neg_one = llvm::ConstantFP::get(float_ty, -1.0);
@@ -168,8 +166,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       return nullptr;
     }
     QD_ASSERT(stmt->val->ret_type->is<PrimitiveType>());
-    PrimitiveTypeID prim_type =
-        stmt->val->ret_type->cast<PrimitiveType>()->type;
+    PrimitiveTypeID prim_type = stmt->val->ret_type->cast<PrimitiveType>()->type;
     AtomicOpType op = stmt->op_type;
     llvm::Value *dest = llvm_val[stmt->dest];
     llvm::Value *val = llvm_val[stmt->val];
@@ -204,6 +201,10 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
             stmt->val->ret_type);
       }
     }
+    // Direct atomics handle every supported (type, op) combination above; falling through to
+    // runtime reduce_* helpers requires addrspace(0) operands but SNode dests arrive in addrspace(1),
+    // so the helper path triggers cast/inline blowup. Return nullptr so the caller emits the
+    // base CAS / atomicrmw path with the addrspace preserved.
     return nullptr;
   }
 
@@ -229,9 +230,8 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
 
     llvm::Function *body;
     {
-      auto guard = get_function_creation_guard(
-          {llvm::PointerType::get(get_runtime_type("RuntimeContext"), 0),
-           get_tls_buffer_type(), tlctx->get_data_type<int>()});
+      auto guard = get_function_creation_guard({llvm::PointerType::get(get_runtime_type("RuntimeContext"), 0),
+                                                get_tls_buffer_type(), tlctx->get_data_type<int>()});
 
       auto loop_var = create_entry_block_alloca(PrimitiveType::i32);
       loop_vars_llvm[stmt].push_back(loop_var);
@@ -252,10 +252,13 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     auto epilogue = create_xlogue(stmt->tls_epilogue);
 
     auto [begin, end] = get_range_for_bounds(stmt);
+    // ``_fixed_config`` variant baked into runtime.cpp pins block_dim/grid_dim explicitly,
+    // matching what we tag on the kernel function attributes (avoids a runtime grid_dim
+    // recomputation when the host-side codegen has already proven the launch geometry).
     call("gpu_parallel_range_for_fixed_config",
          {get_context(), begin, end, tlctx->get_constant(stmt->block_dim),
-          tlctx->get_constant(get_effective_range_grid_dim(stmt)), tls_prologue,
-          body, epilogue, tlctx->get_constant(stmt->tls_size)});
+          tlctx->get_constant(get_effective_range_grid_dim(stmt)), tls_prologue, body, epilogue,
+          tlctx->get_constant(stmt->tls_size)});
   }
 
   void create_offload_mesh_for(OffloadedStmt *stmt) override {
@@ -313,11 +316,9 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     // Cast addrspace(1) input to addrspace(0) for base visitor's
     // runtime function calls, then cast result back to addrspace(1).
     auto *input = llvm_val[stmt->input_snode];
-    if (input && input->getType()->isPointerTy() &&
-        input->getType()->getPointerAddressSpace() == 1) {
+    if (input && input->getType()->isPointerTy() && input->getType()->getPointerAddressSpace() == 1) {
       auto *ptr_as0 = llvm::PointerType::getUnqual(*llvm_context);
-      llvm_val[stmt->input_snode] =
-          builder->CreateAddrSpaceCast(input, ptr_as0);
+      llvm_val[stmt->input_snode] = builder->CreateAddrSpaceCast(input, ptr_as0);
     }
     TaskCodeGenLLVM::visit(stmt);
     llvm_val[stmt->input_snode] = input;
@@ -455,16 +456,39 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
   }
 
   void visit(GlobalLoadStmt *stmt) override {
-    // Minimal override: pointer arrives with the correct addrspace from
-    // the source visitors above (or GetCh chain for SNode), so base
-    // CreateLoad lowers to the right ISA without a consumer-side cast.
-    // The only thing we add over base is plumbing the read_only flag
-    // through to create_intrinsic_load so SNode loads marked with
+    // Bit-pointer / quant-type loads need to crack the physical word and reconstruct the value
+    // from a sub-word slice. Same lowering as the base LLVM codegen — kept here so that the
+    // AMDGPU-specific byte-pointer fast path below doesn't accidentally short-circuit it.
+    auto ptr_type = stmt->src->ret_type->as<PointerType>();
+    if (ptr_type->is_bit_pointer()) {
+      auto ptr = llvm_val[stmt->src];
+      auto val_type = ptr_type->get_pointee_type();
+      auto get_ch = stmt->src->as<GetChStmt>();
+      auto physical_type = tlctx->get_data_type(get_ch->input_snode->physical_type);
+      auto [byte_ptr, bit_offset] = load_bit_ptr(ptr);
+      auto physical_value = builder->CreateLoad(physical_type, byte_ptr);
+      if (auto qit = val_type->cast<QuantIntType>()) {
+        llvm_val[stmt] = extract_quant_int(physical_value, bit_offset, qit);
+      } else if (auto qfxt = val_type->cast<QuantFixedType>()) {
+        qit = qfxt->get_digits_type()->as<QuantIntType>();
+        auto digits = extract_quant_int(physical_value, bit_offset, qit);
+        llvm_val[stmt] = reconstruct_quant_fixed(digits, qfxt);
+      } else {
+        QD_ASSERT(val_type->is<QuantFloatType>());
+        QD_ASSERT(get_ch->input_snode->dt->is<BitStructType>());
+        llvm_val[stmt] = extract_quant_float(physical_value, get_ch->input_snode->dt->as<BitStructType>(),
+                                             get_ch->output_snode->id_in_bit_struct);
+      }
+      return;
+    }
+    // Byte-pointer fast path: pointer arrives with the correct addrspace from the source
+    // visitors above (or the GetCh chain for SNode), so base CreateLoad lowers to the right
+    // ISA without a consumer-side cast. The only thing we add over base is plumbing the
+    // read_only flag through to create_intrinsic_load so SNode loads marked with
     // SNodeAccessFlag::read_only get !invariant.load metadata for LICM.
     bool should_cache_as_read_only = false;
     if (auto get_ch = stmt->src->cast<GetChStmt>()) {
-      should_cache_as_read_only = current_offload->mem_access_opt.has_flag(
-          get_ch->output_snode, SNodeAccessFlag::read_only);
+      should_cache_as_read_only = current_offload->mem_access_opt.has_flag(get_ch->output_snode, SNodeAccessFlag::read_only);
     }
     create_global_load(stmt, should_cache_as_read_only);
   }
@@ -511,22 +535,34 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       }
       if (stmt->task_type == Type::listgen) {
         int num_SMs;
-        AMDGPUDriver::get_instance().device_get_attribute(
-            &num_SMs, HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, 0);
+        AMDGPUDriver::get_instance().device_get_attribute(&num_SMs, HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, 0);
         int max_threads_per_sm = 0;
         AMDGPUDriver::get_instance().device_get_attribute(
-            &max_threads_per_sm,
-            HIP_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, 0);
+            &max_threads_per_sm, HIP_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, 0);
         int query_max_block_per_sm =
-            (max_threads_per_sm > 0 && stmt->block_dim > 0)
-                ? (max_threads_per_sm / stmt->block_dim)
-                : 32;
+            (max_threads_per_sm > 0 && stmt->block_dim > 0) ? (max_threads_per_sm / stmt->block_dim) : 32;
         current_task->grid_dim = num_SMs * query_max_block_per_sm;
       }
       current_task->block_dim = stmt->block_dim;
       current_task->dynamic_shared_array_bytes = dynamic_shared_array_bytes;
       QD_ASSERT(current_task->grid_dim != 0);
       QD_ASSERT(current_task->block_dim != 0);
+      // Host-side adstack sizing, same scheme as codegen_cuda: tight `grid_dim * block_dim` for
+      // non-range_for and const-bound range_for, dynamic resolution via gtmps DtoH memcpy for
+      // dynamic-bound range_for. See llvm_compiled_data.h::AdStackSizingInfo for the resolution
+      // rule the kernel launcher applies.
+      if (current_task->ad_stack.per_thread_stride > 0) {
+        current_task->ad_stack.static_num_threads =
+            static_cast<std::size_t>(current_task->grid_dim) * static_cast<std::size_t>(current_task->block_dim);
+        if (stmt->task_type == Type::range_for && !(stmt->const_begin && stmt->const_end)) {
+          current_task->ad_stack.dynamic_gpu_range_for = true;
+          current_task->ad_stack.begin_const_value = stmt->const_begin ? stmt->begin_value : 0;
+          current_task->ad_stack.end_const_value = stmt->const_end ? stmt->end_value : 0;
+          current_task->ad_stack.begin_offset_bytes =
+              stmt->const_begin ? -1 : static_cast<std::int32_t>(stmt->begin_offset);
+          current_task->ad_stack.end_offset_bytes = stmt->const_end ? -1 : static_cast<std::int32_t>(stmt->end_offset);
+        }
+      }
       offloaded_tasks.push_back(*current_task);
       current_task = nullptr;
       dynamic_shared_array_bytes = 0;
@@ -542,6 +578,24 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       TaskCodeGenLLVM::visit_call_bitcode(stmt);
     } else {
       QD_NOT_IMPLEMENTED
+    }
+  }
+
+  void visit(InternalFuncStmt *stmt) override {
+    if (stmt->func_name == "subgroupShuffle" || stmt->func_name == "subgroupBroadcast") {
+      auto index = builder->CreateZExtOrTrunc(llvm_val[stmt->args[1]], llvm::Type::getInt32Ty(*llvm_context));
+      llvm_val[stmt] = emit_amdgpu_shuffle(
+          /* value=*/llvm_val[stmt->args[0]],
+          /* dt=*/stmt->args[0]->ret_type, index);
+    } else if (stmt->func_name == "subgroupShuffleDown") {
+      auto offset = builder->CreateZExtOrTrunc(llvm_val[stmt->args[1]], llvm::Type::getInt32Ty(*llvm_context));
+      llvm_val[stmt] = emit_amdgpu_shuffle_down(
+          /* value=*/llvm_val[stmt->args[0]],
+          /* dt=*/stmt->args[0]->ret_type, offset);
+    } else if (stmt->func_name == "subgroupInvocationId") {
+      llvm_val[stmt] = call("amdgpu_lane_id");
+    } else {
+      TaskCodeGenLLVM::visit(stmt);
     }
   }
 
@@ -562,13 +616,10 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       } else if (ret_quadrants_type->is_primitive(PrimitiveTypeID::f64)) {
         llvm_val[stmt] = call("__ocml_pow_f64", {lhs, rhs});
       } else if (ret_quadrants_type->is_primitive(PrimitiveTypeID::i32)) {
-        auto sitofp_lhs_ =
-            builder->CreateSIToFP(lhs, llvm::Type::getDoubleTy(*llvm_context));
-        auto sitofp_rhs_ =
-            builder->CreateSIToFP(rhs, llvm::Type::getDoubleTy(*llvm_context));
+        auto sitofp_lhs_ = builder->CreateSIToFP(lhs, llvm::Type::getDoubleTy(*llvm_context));
+        auto sitofp_rhs_ = builder->CreateSIToFP(rhs, llvm::Type::getDoubleTy(*llvm_context));
         auto ret_ = call("__ocml_pow_f64", {sitofp_lhs_, sitofp_rhs_});
-        llvm_val[stmt] =
-            builder->CreateFPToSI(ret_, llvm::Type::getInt32Ty(*llvm_context));
+        llvm_val[stmt] = builder->CreateFPToSI(ret_, llvm::Type::getInt32Ty(*llvm_context));
       } else {
         QD_NOT_IMPLEMENTED
       }
@@ -586,25 +637,51 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
   }
 
  private:
+  llvm::Value *emit_amdgpu_shuffle(llvm::Value *value, DataType dt, llvm::Value *index) {
+    if (dt->is_primitive(PrimitiveTypeID::i32) || dt->is_primitive(PrimitiveTypeID::u32))
+      return call("amdgpu_shuffle_i32", index, value);
+    if (dt->is_primitive(PrimitiveTypeID::f32))
+      return call("amdgpu_shuffle_f32", index, value);
+    if (dt->is_primitive(PrimitiveTypeID::f64))
+      return call("amdgpu_shuffle_f64", index, value);
+    if (dt->is_primitive(PrimitiveTypeID::i64) || dt->is_primitive(PrimitiveTypeID::u64))
+      return call("amdgpu_shuffle_i64", index, value);
+    QD_ERROR("subgroup shuffle: unsupported type {} on AMDGPU", data_type_name(dt));
+    return nullptr;
+  }
+
+  // FIXME: Currently emulates shuffle_down via ds_bpermute (~50 cycle latency).
+  // Should be upgraded to use DPP ROW_SHR instructions (~4-12 cycles) for
+  // reduction-pattern offsets (1, 2, 4, 8, 16). This requires compile-time
+  // constant DPP control values and architecture-specific handling for cross-row
+  // shifts (offset >= 16).
+  llvm::Value *emit_amdgpu_shuffle_down(llvm::Value *value, DataType dt, llvm::Value *offset) {
+    if (dt->is_primitive(PrimitiveTypeID::i32) || dt->is_primitive(PrimitiveTypeID::u32))
+      return call("amdgpu_shuffle_down_i32", offset, value);
+    if (dt->is_primitive(PrimitiveTypeID::f32))
+      return call("amdgpu_shuffle_down_f32", offset, value);
+    if (dt->is_primitive(PrimitiveTypeID::f64))
+      return call("amdgpu_shuffle_down_f64", offset, value);
+    if (dt->is_primitive(PrimitiveTypeID::i64) || dt->is_primitive(PrimitiveTypeID::u64))
+      return call("amdgpu_shuffle_down_i64", offset, value);
+    QD_ERROR("subgroup shuffle_down: unsupported type {} on AMDGPU", data_type_name(dt));
+    return nullptr;
+  }
+
   std::tuple<llvm::Value *, llvm::Value *> get_spmd_info() override {
-    auto thread_idx = builder->CreateIntrinsic(Intrinsic::amdgcn_workitem_id_x,
-                                               ArrayRef<llvm::Value *>{});
+    auto thread_idx = builder->CreateIntrinsic(Intrinsic::amdgcn_workitem_id_x, ArrayRef<llvm::Value *>{});
     auto workgroup_dim_ =
-        call("__ockl_get_local_size",
-             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*llvm_context), 0));
-    auto block_dim = builder->CreateTrunc(
-        workgroup_dim_, llvm::Type::getInt32Ty(*llvm_context));
+        call("__ockl_get_local_size", llvm::ConstantInt::get(llvm::Type::getInt32Ty(*llvm_context), 0));
+    auto block_dim = builder->CreateTrunc(workgroup_dim_, llvm::Type::getInt32Ty(*llvm_context));
     return std::make_tuple(thread_idx, block_dim);
   }
 };
 
-LLVMCompiledTask KernelCodeGenAMDGPU::compile_task(
-    int task_codegen_id,
-    const CompileConfig &config,
-    std::unique_ptr<llvm::Module> &&module,
-    IRNode *block) {
-  TaskCodeGenAMDGPU gen(task_codegen_id, config, get_quadrants_llvm_context(),
-                        kernel, block);
+LLVMCompiledTask KernelCodeGenAMDGPU::compile_task(int task_codegen_id,
+                                                   const CompileConfig &config,
+                                                   std::unique_ptr<llvm::Module> &&module,
+                                                   IRNode *block) {
+  TaskCodeGenAMDGPU gen(task_codegen_id, config, get_quadrants_llvm_context(), kernel, block);
   return gen.run_compilation();
 }
 
