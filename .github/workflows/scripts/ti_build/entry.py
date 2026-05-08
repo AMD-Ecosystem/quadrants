@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import os
 import platform
 import sys
 
@@ -18,6 +19,33 @@ from .tinysh import Command, CommandFailed, nice, sh
 
 
 # -- code --
+@banner("Configure Quadrants (cmake only, no build)")
+def configure_only() -> None:
+    """
+    Run cmake configure into ./build with the user-supplied
+    QUADRANTS_CMAKE_ARGS, *without* building. This is used by linter-style
+    workflows (e.g. clang-tidy) that only need compile_commands.json. It
+    reuses the same toolchain bootstrap as `action_wheel` (clang, prebuilt
+    LLVM, sccache, OS packages) but skips skbuild / setup.py entirely.
+    """
+    cmake_args.writeback()
+    extra_args = os.environ.get("QUADRANTS_CMAKE_ARGS", "").split()
+    build_dir = os.environ.get("QUADRANTS_BUILD_DIR", "build")
+    cmake = sh.bake("cmake")
+    with nice():
+        cmake(
+            "-S",
+            ".",
+            "-B",
+            build_dir,
+            "-G",
+            "Ninja",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+            *extra_args,
+        )
+
+
 @banner("Build Quadrants Wheel")
 def build_wheel(python: Command) -> None:
     extra = []
@@ -86,12 +114,27 @@ def action_wheel():
         pass
 
 
+def action_configure():
+    """
+    Bootstrap the same toolchain as `action_wheel` (OS packages, clang,
+    prebuilt LLVM, sccache discovery) and then stop after `cmake configure`.
+    Produces ./build/compile_commands.json for downstream tools like
+    clang-tidy. Does not build any C++ targets and does not produce a wheel.
+    """
+    setup_os_pkgs()
+    _sccache, _python = setup_basic_build_env()
+    handle_alternate_actions()
+    configure_only()
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
 
     # Possible actions:
-    #   wheel: build the wheel
-    help = 'Action, may be build target "wheel" for opening the cache directory.'
+    #   wheel:     build the wheel (default)
+    #   configure: cmake configure only, into ./build, producing
+    #              compile_commands.json for tools like clang-tidy.
+    help = 'Action, one of: "wheel" (default), "configure".'
     parser.add_argument("action", type=str, nargs="?", default="wheel", help=help)
 
     help = "Do not build, write environment variables to file instead"
@@ -119,6 +162,7 @@ def main() -> int:
 
     dispatch = {
         "wheel": action_wheel,
+        "configure": action_configure,
     }
 
     dispatch.get(options.action, action_notimpl)()
