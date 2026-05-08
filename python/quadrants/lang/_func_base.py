@@ -3,7 +3,6 @@
 # it as private because torch's stubs don't re-export it via __all__.
 import ast
 import inspect
-import math
 import os
 import sys
 import textwrap

@@ -54,8 +54,7 @@ DeviceAllocation AmdgpuDevice::allocate_memory_runtime(const LlvmRuntimeAllocPar
   if (info.size == 0) {
     info.ptr = nullptr;
   } else if (params.use_memory_pool) {
-    AMDGPUDriver::get_instance().malloc_async((void **)&info.ptr, info.size,
-                                              nullptr);
+    AMDGPUDriver::get_instance().malloc_async((void **)&info.ptr, info.size, nullptr);
   } else if (params.host_read || params.host_write) {
     QD_NOT_IMPLEMENTED
   } else if (info.size == 0) {

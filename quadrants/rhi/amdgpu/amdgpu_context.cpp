@@ -78,16 +78,13 @@ AMDGPUContext::AMDGPUContext() : driver_(AMDGPUDriver::get_instance_without_cont
 
   if (driver_.device_get_default_mem_pool.is_available()) {
     void *default_mem_pool = nullptr;
-    uint32 err = driver_.device_get_default_mem_pool.call_with_warning(
-        &default_mem_pool, 0);
+    uint32 err = driver_.device_get_default_mem_pool.call_with_warning(&default_mem_pool, 0);
     if (err == HIP_SUCCESS && default_mem_pool != nullptr) {
       supports_mem_pool_ = true;
       constexpr uint64 kMemPoolReleaseThreshold = 1048576 * 128;
-      driver_.mem_pool_set_attribute(default_mem_pool,
-                                     HIP_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+      driver_.mem_pool_set_attribute(default_mem_pool, HIP_MEMPOOL_ATTR_RELEASE_THRESHOLD,
                                      (void *)&kMemPoolReleaseThreshold);
-      QD_TRACE("HIP memory pool enabled (release threshold: {} bytes)",
-               kMemPoolReleaseThreshold);
+      QD_TRACE("HIP memory pool enabled (release threshold: {} bytes)", kMemPoolReleaseThreshold);
     }
   }
 
@@ -194,8 +191,8 @@ void AMDGPUContext::launch(void *func,
     KernelProfilerAMDGPU *profiler_amdgpu = dynamic_cast<KernelProfilerAMDGPU *>(profiler_);
     std::string primal_task_name, key;
     bool valid = offline_cache::try_demangle_name(task_name, primal_task_name, key);
-    profiler_amdgpu->trace(
-        task_handle, valid ? primal_task_name : task_name, func, grid_dim, block_dim, dynamic_shared_mem_bytes);
+    profiler_amdgpu->trace(task_handle, valid ? primal_task_name : task_name, func, grid_dim, block_dim,
+                           dynamic_shared_mem_bytes);
   }
 
   auto context_guard = AMDGPUContext::get_instance().get_guard();

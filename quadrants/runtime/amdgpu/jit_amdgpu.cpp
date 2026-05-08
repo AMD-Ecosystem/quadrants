@@ -69,22 +69,16 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(std::unique_ptr<llvm::Modu
     if (F.getCallingConv() == llvm::CallingConv::AMDGPU_KERNEL) {
       const std::string kernel_name = F.getName().str();
       const bool is_lightweight_cg_subkernel =
-          kernel_name.find("_kernel_cg_only_save_prev_grad") !=
-              std::string::npos ||
-          kernel_name.find("_kernel_update_constraint_forces") !=
-              std::string::npos ||
-          kernel_name.find("_kernel_update_constraint_qfrc") !=
-              std::string::npos ||
-          kernel_name.find("_kernel_update_constraint_cost") !=
-              std::string::npos ||
-          kernel_name.find("_kernel_update_search_direction") !=
-              std::string::npos;
+          kernel_name.find("_kernel_cg_only_save_prev_grad") != std::string::npos ||
+          kernel_name.find("_kernel_update_constraint_forces") != std::string::npos ||
+          kernel_name.find("_kernel_update_constraint_qfrc") != std::string::npos ||
+          kernel_name.find("_kernel_update_constraint_cost") != std::string::npos ||
+          kernel_name.find("_kernel_update_search_direction") != std::string::npos;
 
       // Each default below is skipped if the kernel already carries that
       // attribute (set upstream in codegen_llvm.cpp from user-supplied
       // @qd.kernel(fn_attrs={...})). User values win.
-      if (!is_lightweight_cg_subkernel &&
-          !F.hasFnAttribute("amdgpu-waves-per-eu")) {
+      if (!is_lightweight_cg_subkernel && !F.hasFnAttribute("amdgpu-waves-per-eu")) {
         F.addFnAttr("amdgpu-waves-per-eu", "1,2");
       }
       if (!F.hasFnAttribute("uniform-work-group-size")) {
@@ -123,8 +117,7 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(std::unique_ptr<llvm::Modu
       auto *Caller = CB->getFunction();
       if (Caller && Caller->getCallingConv() == llvm::CallingConv::AMDGPU_KERNEL &&
           Caller->hasFnAttribute("amdgpu-flat-work-group-size")) {
-        inherited =
-            Caller->getFnAttribute("amdgpu-flat-work-group-size").getValueAsString();
+        inherited = Caller->getFnAttribute("amdgpu-flat-work-group-size").getValueAsString();
         break;
       }
     }
@@ -135,9 +128,8 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(std::unique_ptr<llvm::Modu
 
   auto *daz_type = llvm::Type::getInt8Ty(llvm_module->getContext());
   auto *daz_init = llvm::ConstantInt::get(daz_type, 1);
-  auto *daz_var = new llvm::GlobalVariable(
-      *llvm_module, daz_type, true, llvm::GlobalValue::LinkOnceODRLinkage,
-      daz_init, "__oclc_daz_opt");
+  auto *daz_var = new llvm::GlobalVariable(*llvm_module, daz_type, true, llvm::GlobalValue::LinkOnceODRLinkage,
+                                           daz_init, "__oclc_daz_opt");
   daz_var->setVisibility(llvm::GlobalValue::HiddenVisibility);
 
   if (llvm::verifyModule(*llvm_module, &llvm::errs())) {

@@ -79,13 +79,7 @@ PER_AMDGPU_FUNCTION(graph_add_kernel_node,
                     const void *);
 // hipGraphInstantiate(hipGraphExec_t *pGraphExec, hipGraph_t graph,
 //   hipGraphNode_t *pErrorNode, char *pLogBuffer, size_t bufferSize)
-PER_AMDGPU_FUNCTION(graph_instantiate,
-                    hipGraphInstantiate,
-                    void **,
-                    void *,
-                    void *,
-                    char *,
-                    std::size_t);
+PER_AMDGPU_FUNCTION(graph_instantiate, hipGraphInstantiate, void **, void *, void *, char *, std::size_t);
 // hipGraphExecDestroy(hipGraphExec_t graphExec)
 PER_AMDGPU_FUNCTION(graph_exec_destroy, hipGraphExecDestroy, void *);
 // hipGraphLaunch(hipGraphExec_t graphExec, hipStream_t stream)

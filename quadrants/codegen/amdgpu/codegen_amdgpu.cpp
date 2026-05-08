@@ -51,9 +51,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
   void visit(AllocaStmt *stmt) override {
     auto tensor_type = stmt->ret_type.ptr_removed()->cast<TensorType>();
     if (tensor_type && stmt->is_shared) {
-      size_t shared_array_bytes =
-          tensor_type->get_num_elements() *
-          data_type_size(tensor_type->get_element_type());
+      size_t shared_array_bytes = tensor_type->get_num_elements() * data_type_size(tensor_type->get_element_type());
       if (shared_array_bytes > cuda_dynamic_shared_array_threshold_bytes) {
         if (dynamic_shared_array_bytes > 0) {
           QD_ERROR(
@@ -65,11 +63,9 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       }
 
       auto type = tlctx->get_data_type(tensor_type);
-      auto base = new llvm::GlobalVariable(
-          *module, type, false, llvm::GlobalValue::ExternalLinkage, nullptr,
-          fmt::format("shared_array_t{}_s{}", task_codegen_id, stmt->id),
-          nullptr, llvm::GlobalVariable::NotThreadLocal,
-          3 /*addrspace=LDS*/);
+      auto base = new llvm::GlobalVariable(*module, type, false, llvm::GlobalValue::ExternalLinkage, nullptr,
+                                           fmt::format("shared_array_t{}_s{}", task_codegen_id, stmt->id), nullptr,
+                                           llvm::GlobalVariable::NotThreadLocal, 3 /*addrspace=LDS*/);
       base->setAlignment(llvm::MaybeAlign(8));
       auto ptr_type = llvm::PointerType::get(type, 0);
       llvm_val[stmt] = builder->CreatePointerCast(base, ptr_type);
@@ -180,25 +176,19 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       i32_ops[AtomicOpType::bit_or] = llvm::AtomicRMWInst::BinOp::Or;
       i32_ops[AtomicOpType::bit_xor] = llvm::AtomicRMWInst::BinOp::Xor;
       if (i32_ops.find(op) != i32_ops.end()) {
-        return builder->CreateAtomicRMW(
-            i32_ops.at(op), dest, val, llvm::MaybeAlign(0),
-            llvm::AtomicOrdering::SequentiallyConsistent);
+        return builder->CreateAtomicRMW(i32_ops.at(op), dest, val, llvm::MaybeAlign(0),
+                                        llvm::AtomicOrdering::SequentiallyConsistent);
       }
     } else if (prim_type == PrimitiveTypeID::f32) {
       if (op == AtomicOpType::add) {
-        return builder->CreateAtomicRMW(
-            llvm::AtomicRMWInst::FAdd, dest, val, llvm::MaybeAlign(0),
-            llvm::AtomicOrdering::SequentiallyConsistent);
+        return builder->CreateAtomicRMW(llvm::AtomicRMWInst::FAdd, dest, val, llvm::MaybeAlign(0),
+                                        llvm::AtomicOrdering::SequentiallyConsistent);
       } else if (op == AtomicOpType::min) {
         return atomic_op_using_cas(
-            dest, val,
-            [&](auto v1, auto v2) { return builder->CreateMinNum(v1, v2); },
-            stmt->val->ret_type);
+            dest, val, [&](auto v1, auto v2) { return builder->CreateMinNum(v1, v2); }, stmt->val->ret_type);
       } else if (op == AtomicOpType::max) {
         return atomic_op_using_cas(
-            dest, val,
-            [&](auto v1, auto v2) { return builder->CreateMaxNum(v1, v2); },
-            stmt->val->ret_type);
+            dest, val, [&](auto v1, auto v2) { return builder->CreateMaxNum(v1, v2); }, stmt->val->ret_type);
       }
     }
     // Direct atomics handle every supported (type, op) combination above; falling through to
@@ -216,9 +206,8 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     int grid_dim = stmt->grid_dim;
     if (stmt->const_begin && stmt->const_end) {
       int num_threads = stmt->end_value - stmt->begin_value;
-      int exact_grid_dim = ((num_threads % stmt->block_dim) == 0)
-                               ? (num_threads / stmt->block_dim)
-                               : (num_threads / stmt->block_dim) + 1;
+      int exact_grid_dim = ((num_threads % stmt->block_dim) == 0) ? (num_threads / stmt->block_dim)
+                                                                  : (num_threads / stmt->block_dim) + 1;
       exact_grid_dim = std::max(exact_grid_dim, 1);
       grid_dim = std::min(grid_dim, exact_grid_dim);
     }
@@ -255,10 +244,9 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     // ``_fixed_config`` variant baked into runtime.cpp pins block_dim/grid_dim explicitly,
     // matching what we tag on the kernel function attributes (avoids a runtime grid_dim
     // recomputation when the host-side codegen has already proven the launch geometry).
-    call("gpu_parallel_range_for_fixed_config",
-         {get_context(), begin, end, tlctx->get_constant(stmt->block_dim),
-          tlctx->get_constant(get_effective_range_grid_dim(stmt)), tls_prologue, body, epilogue,
-          tlctx->get_constant(stmt->tls_size)});
+    call("gpu_parallel_range_for_fixed_config", {get_context(), begin, end, tlctx->get_constant(stmt->block_dim),
+                                                 tlctx->get_constant(get_effective_range_grid_dim(stmt)), tls_prologue,
+                                                 body, epilogue, tlctx->get_constant(stmt->tls_size)});
   }
 
   void create_offload_mesh_for(OffloadedStmt *stmt) override {
@@ -330,17 +318,14 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
   }
 
   void visit(GetChStmt *stmt) override {
-    if (stmt->input_snode->type == SNodeType::quant_array ||
-        stmt->ret_type->as<PointerType>()->is_bit_pointer()) {
+    if (stmt->input_snode->type == SNodeType::quant_array || stmt->ret_type->as<PointerType>()->is_bit_pointer()) {
       TaskCodeGenLLVM::visit(stmt);
       return;
     }
     auto *input = llvm_val[stmt->input_ptr];
-    if (input && input->getType()->isPointerTy() &&
-        input->getType()->getPointerAddressSpace() == 1) {
+    if (input && input->getType()->isPointerTy() && input->getType()->getPointerAddressSpace() == 1) {
       auto *ptr_as0 = llvm::PointerType::getUnqual(*llvm_context);
-      llvm_val[stmt->input_ptr] =
-          builder->CreateAddrSpaceCast(input, ptr_as0);
+      llvm_val[stmt->input_ptr] = builder->CreateAddrSpaceCast(input, ptr_as0);
     }
     TaskCodeGenLLVM::visit(stmt);
     llvm_val[stmt->input_ptr] = input;
@@ -353,28 +338,21 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
 
   llvm::Value *get_runtime() override {
     auto *runtime_context_ty = get_runtime_type("RuntimeContext");
-    auto *runtime_ptr_addr = builder->CreateStructGEP(
-        runtime_context_ty, TaskCodeGenLLVM::get_context(), 1);
-    auto *runtime_ty =
-        llvm::PointerType::get(get_runtime_type("LLVMRuntime"), 0);
+    auto *runtime_ptr_addr = builder->CreateStructGEP(runtime_context_ty, TaskCodeGenLLVM::get_context(), 1);
+    auto *runtime_ty = llvm::PointerType::get(get_runtime_type("LLVMRuntime"), 0);
     auto *runtime_ptr = builder->CreateLoad(runtime_ty, runtime_ptr_addr);
-    auto *invariant_load_metadata =
-        llvm::MDNode::get(builder->getContext(), {});
-    runtime_ptr->setMetadata(llvm::LLVMContext::MD_invariant_load,
-                             invariant_load_metadata);
+    auto *invariant_load_metadata = llvm::MDNode::get(builder->getContext(), {});
+    runtime_ptr->setMetadata(llvm::LLVMContext::MD_invariant_load, invariant_load_metadata);
     return runtime_ptr;
   }
 
   // Read-only cache loads via invariant.load metadata
-  llvm::Value *create_intrinsic_load(llvm::Value *ptr,
-                                     llvm::Type *ty) override {
+  llvm::Value *create_intrinsic_load(llvm::Value *ptr, llvm::Type *ty) override {
     auto *ptr_ty_addrspace_1 = llvm::PointerType::get(ty, 1);
     auto *cast_ptr = builder->CreateAddrSpaceCast(ptr, ptr_ty_addrspace_1);
     auto *load = builder->CreateLoad(ty, cast_ptr);
-    auto *invariant_load_metadata =
-        llvm::MDNode::get(builder->getContext(), {});
-    load->setMetadata(llvm::LLVMContext::MD_invariant_load,
-                      invariant_load_metadata);
+    auto *invariant_load_metadata = llvm::MDNode::get(builder->getContext(), {});
+    load->setMetadata(llvm::LLVMContext::MD_invariant_load, invariant_load_metadata);
     return load;
   }
 
@@ -385,31 +363,22 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     // address space here so matrix-element accesses on global / LDS /
     // scratch-backed origins land in the correct memory unit.
     auto *origin_ptr = llvm_val[stmt->origin];
-    unsigned origin_as = origin_ptr->getType()->isPointerTy()
-                             ? origin_ptr->getType()->getPointerAddressSpace()
-                             : 0;
+    unsigned origin_as = origin_ptr->getType()->isPointerTy() ? origin_ptr->getType()->getPointerAddressSpace() : 0;
     if (stmt->offset_used_as_index()) {
-      auto *origin_pointee_ty =
-          tlctx->get_data_type(stmt->origin->ret_type.ptr_removed());
-      auto *casted_ptr = builder->CreateBitCast(
-          origin_ptr, llvm::PointerType::get(origin_pointee_ty, origin_as));
-      llvm_val[stmt] = builder->CreateGEP(
-          origin_pointee_ty, casted_ptr,
-          {tlctx->get_constant(0), llvm_val[stmt->offset]});
+      auto *origin_pointee_ty = tlctx->get_data_type(stmt->origin->ret_type.ptr_removed());
+      auto *casted_ptr = builder->CreateBitCast(origin_ptr, llvm::PointerType::get(origin_pointee_ty, origin_as));
+      llvm_val[stmt] =
+          builder->CreateGEP(origin_pointee_ty, casted_ptr, {tlctx->get_constant(0), llvm_val[stmt->offset]});
     } else {
       // Byte-offset GEP preserves pointer provenance and address space,
       // avoiding the PtrToInt/IntToPtr round-trip that breaks addrspace
       // tagging and confuses InferAddressSpaces.
-      auto *byte_ptr = builder->CreateBitCast(
-          origin_ptr, llvm::PointerType::get(
-              llvm::Type::getInt8Ty(*llvm_context), origin_as));
-      auto *address_offset = builder->CreateSExt(
-          llvm_val[stmt->offset], llvm::Type::getInt64Ty(*llvm_context));
-      auto *offset_ptr = builder->CreateGEP(
-          llvm::Type::getInt8Ty(*llvm_context), byte_ptr, address_offset);
+      auto *byte_ptr =
+          builder->CreateBitCast(origin_ptr, llvm::PointerType::get(llvm::Type::getInt8Ty(*llvm_context), origin_as));
+      auto *address_offset = builder->CreateSExt(llvm_val[stmt->offset], llvm::Type::getInt64Ty(*llvm_context));
+      auto *offset_ptr = builder->CreateGEP(llvm::Type::getInt8Ty(*llvm_context), byte_ptr, address_offset);
       auto pointee_ty = tlctx->get_data_type(stmt->ret_type.ptr_removed());
-      llvm_val[stmt] = builder->CreateBitCast(
-          offset_ptr, llvm::PointerType::get(pointee_ty, origin_as));
+      llvm_val[stmt] = builder->CreateBitCast(offset_ptr, llvm::PointerType::get(pointee_ty, origin_as));
     }
   }
 
@@ -419,8 +388,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     // downstream loads/stores emit global_load/store via InferAddressSpaces.
     TaskCodeGenLLVM::visit(stmt);
     auto *current = llvm_val[stmt];
-    if (current && current->getType()->isPointerTy() &&
-        current->getType()->getPointerAddressSpace() != 1) {
+    if (current && current->getType()->isPointerTy() && current->getType()->getPointerAddressSpace() != 1) {
       auto *ptr_as1 = llvm::PointerType::get(*llvm_context, 1);
       llvm_val[stmt] = builder->CreateAddrSpaceCast(current, ptr_as1);
     }
@@ -431,8 +399,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     // (hipMalloc'd). Same source-tagging pattern as ExternalPtrStmt.
     TaskCodeGenLLVM::visit(stmt);
     auto *current = llvm_val[stmt];
-    if (current && current->getType()->isPointerTy() &&
-        current->getType()->getPointerAddressSpace() != 1) {
+    if (current && current->getType()->isPointerTy() && current->getType()->getPointerAddressSpace() != 1) {
       auto *ptr_as1 = llvm::PointerType::get(*llvm_context, 1);
       llvm_val[stmt] = builder->CreateAddrSpaceCast(current, ptr_as1);
     }
@@ -447,11 +414,8 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     // pointer as global. Skip the cast and keep addrspace(3).
     QD_ASSERT(bls_buffer);
     auto *base = bls_buffer;  // already addrspace(3)
-    auto *ptr =
-        builder->CreateGEP(base->getValueType(), base,
-                           {tlctx->get_constant(0), llvm_val[stmt->offset]});
-    auto *ptr_ty_lds = llvm::PointerType::get(
-        tlctx->get_data_type(stmt->ret_type.ptr_removed()), 3);
+    auto *ptr = builder->CreateGEP(base->getValueType(), base, {tlctx->get_constant(0), llvm_val[stmt->offset]});
+    auto *ptr_ty_lds = llvm::PointerType::get(tlctx->get_data_type(stmt->ret_type.ptr_removed()), 3);
     llvm_val[stmt] = builder->CreatePointerCast(ptr, ptr_ty_lds);
   }
 
@@ -488,19 +452,18 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     // SNodeAccessFlag::read_only get !invariant.load metadata for LICM.
     bool should_cache_as_read_only = false;
     if (auto get_ch = stmt->src->cast<GetChStmt>()) {
-      should_cache_as_read_only = current_offload->mem_access_opt.has_flag(get_ch->output_snode, SNodeAccessFlag::read_only);
+      should_cache_as_read_only =
+          current_offload->mem_access_opt.has_flag(get_ch->output_snode, SNodeAccessFlag::read_only);
     }
     create_global_load(stmt, should_cache_as_read_only);
   }
 
   // BLS / shared memory buffer allocation
   void create_bls_buffer(OffloadedStmt *stmt) {
-    auto type = llvm::ArrayType::get(
-        llvm::Type::getInt8Ty(*llvm_context), stmt->bls_size);
-    bls_buffer = new llvm::GlobalVariable(
-        *module, type, false, llvm::GlobalValue::ExternalLinkage, nullptr,
-        "bls_buffer", nullptr, llvm::GlobalVariable::NotThreadLocal,
-        3 /*addrspace=LDS*/);
+    auto type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*llvm_context), stmt->bls_size);
+    bls_buffer =
+        new llvm::GlobalVariable(*module, type, false, llvm::GlobalValue::ExternalLinkage, nullptr, "bls_buffer",
+                                 nullptr, llvm::GlobalVariable::NotThreadLocal, 3 /*addrspace=LDS*/);
     bls_buffer->setAlignment(llvm::MaybeAlign(8));
   }
 
@@ -537,8 +500,8 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
         int num_SMs;
         AMDGPUDriver::get_instance().device_get_attribute(&num_SMs, HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, 0);
         int max_threads_per_sm = 0;
-        AMDGPUDriver::get_instance().device_get_attribute(
-            &max_threads_per_sm, HIP_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, 0);
+        AMDGPUDriver::get_instance().device_get_attribute(&max_threads_per_sm,
+                                                          HIP_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR, 0);
         int query_max_block_per_sm =
             (max_threads_per_sm > 0 && stmt->block_dim > 0) ? (max_threads_per_sm / stmt->block_dim) : 32;
         current_task->grid_dim = num_SMs * query_max_block_per_sm;
