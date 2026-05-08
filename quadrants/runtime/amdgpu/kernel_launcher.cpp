@@ -54,9 +54,14 @@ std::size_t resolve_num_threads(const OffloadedTask &task, LlvmRuntimeExecutor *
 void KernelLauncher::launch_offloaded_tasks(LaunchContextBuilder &ctx,
                                             JITModule *amdgpu_module,
                                             const std::vector<OffloadedTask> &offloaded_tasks,
-                                            void *context_pointer,
-                                            int arg_size) {
+                                            std::vector<void *> &resolved_funcs,
+                                            void *kernarg_payload,
+                                            int kernarg_size,
+                                            void *device_runtime_context_ptr_for_adstack) {
   auto *executor = get_runtime_executor();
+  if (resolved_funcs.size() != offloaded_tasks.size()) {
+    resolved_funcs.assign(offloaded_tasks.size(), nullptr);
+  }
   // Two gates govern the per-launch adstack publish work, both opt-in by the kernel's IR shape. Forward-only kernels
   // skip both gates and pay zero adstack overhead; reverse-mode kernels without a captured `bound_expr` skip the
   // lazy-claim block, paying the per-task `publish_adstack_metadata` only. See the matching comment in
@@ -76,8 +81,9 @@ void KernelLauncher::launch_offloaded_tasks(LaunchContextBuilder &ctx,
       // Pass the device-side `RuntimeContext` pointer through to the adstack sizer kernel. Without this the sizer
       // launches with a host pointer and the next DtoH sync trips `hipErrorIllegalAddress ... memcpy_device_to_host`
       // because HIP has no UVA fallback for the host `RuntimeContext` struct.
+      QD_ASSERT(device_runtime_context_ptr_for_adstack != nullptr);
       const std::size_t n_threads_amdgpu = resolve_num_threads(task, executor);
-      executor->publish_adstack_metadata(task.ad_stack, n_threads_amdgpu, &ctx, context_pointer);
+      executor->publish_adstack_metadata(task.ad_stack, n_threads_amdgpu, &ctx, device_runtime_context_ptr_for_adstack);
       if (task.ad_stack.bound_expr.has_value()) {
         // Device-side reducer for tasks with a captured ndarray-backed `bound_expr`. Mirrors the CUDA launcher
         // block; on AMDGPU the runtime function dispatches as a single-thread HIP kernel via runtime_jit->call.
@@ -102,7 +108,7 @@ void KernelLauncher::launch_offloaded_tasks(LaunchContextBuilder &ctx,
           bound_count_length = static_cast<std::size_t>(std::max<int64_t>(0, flat_len));
         }
         executor->publish_per_task_bound_count_device(task_index, task.ad_stack, bound_count_length, &ctx,
-                                                      context_pointer);
+                                                      device_runtime_context_ptr_for_adstack);
         // Size the float heap from the published gate-passing count (DtoH'd per task). Mirrors the CUDA / CPU
         // launcher post-reducer sizing.
         executor->ensure_per_task_float_heap_post_reducer(task_index, task.ad_stack, n_threads_amdgpu, &ctx);
@@ -122,19 +128,30 @@ void KernelLauncher::launch_offloaded_tasks(LaunchContextBuilder &ctx,
       }
     }
     QD_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, effective_grid_dim, task.block_dim);
-    amdgpu_module->launch(task.name, effective_grid_dim, task.block_dim, task.dynamic_shared_array_bytes,
-                          {(void *)&context_pointer}, {arg_size});
+    // Resolved-function cache: the post-increment `task_index - 1` on the line above is the slot for this task.
+    // First-launch miss falls through to `lookup_function`, subsequent launches reuse the cached pointer.
+    const std::size_t resolved_idx = task_index - 1;
+    void *func = resolved_funcs[resolved_idx];
+    if (func == nullptr) {
+      func = amdgpu_module->lookup_function(task.name);
+      resolved_funcs[resolved_idx] = func;
+    }
+    AMDGPUContext::get_instance().launch(func, task.name, {kernarg_payload}, {kernarg_size}, effective_grid_dim,
+                                         task.block_dim, task.dynamic_shared_array_bytes);
   }
 }
 
 void KernelLauncher::launch_offloaded_tasks_with_do_while(LaunchContextBuilder &ctx,
                                                           JITModule *amdgpu_module,
                                                           const std::vector<OffloadedTask> &offloaded_tasks,
-                                                          void *context_pointer,
-                                                          int arg_size) {
+                                                          std::vector<void *> &resolved_funcs,
+                                                          void *kernarg_payload,
+                                                          int kernarg_size,
+                                                          void *device_runtime_context_ptr_for_adstack) {
   int32_t counter_val;
   do {
-    launch_offloaded_tasks(ctx, amdgpu_module, offloaded_tasks, context_pointer, arg_size);
+    launch_offloaded_tasks(ctx, amdgpu_module, offloaded_tasks, resolved_funcs, kernarg_payload, kernarg_size,
+                           device_runtime_context_ptr_for_adstack);
     counter_val = 0;
     AMDGPUDriver::get_instance().stream_synchronize(nullptr);
     AMDGPUDriver::get_instance().memcpy_device_to_host(&counter_val, ctx.graph_do_while_flag_dev_ptr, sizeof(int32_t));
@@ -160,7 +177,16 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
   const auto &parameters = *launcher_ctx.parameters;
   const auto &offloaded_tasks = launcher_ctx.offloaded_tasks;
 
-  AMDGPUContext::get_instance().make_current();
+  // Hoist `make_current` out of the per-launch path. The HIP driver setter is a global (locked) call that does
+  // real work even when the current context is unchanged.
+  {
+    thread_local void *cached_set_ctx = nullptr;
+    void *want_ctx = AMDGPUContext::get_instance().get_context();
+    if (cached_set_ctx != want_ctx) {
+      AMDGPUContext::get_instance().make_current();
+      cached_set_ctx = want_ctx;
+    }
+  }
   ctx.get_context().runtime = executor->get_llvm_runtime();
 
   // Change from std::vector<int> to ArgArrayPtrKey
@@ -272,22 +298,48 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
                                                              ctx.arg_buffer_size, nullptr);
     ctx.get_context().arg_buffer = device_arg_buffer;
   }
-  int arg_size = sizeof(RuntimeContext *);
-  if (launcher_ctx.runtime_context_dev_ptr == nullptr) {
-    AMDGPUDriver::get_instance().malloc_async(&launcher_ctx.runtime_context_dev_ptr, sizeof(RuntimeContext), nullptr);
-  }
-  void *context_pointer = launcher_ctx.runtime_context_dev_ptr;
-  AMDGPUDriver::get_instance().memcpy_host_to_device_async(context_pointer, &ctx.get_context(), sizeof(RuntimeContext),
-                                                           nullptr);
+  // Kernarg-by-value path (AMDGPU's `kernel_argument_struct_in_kernarg() == true` codegen): the kernel signature
+  // is `void(%RuntimeContext)` and the bytes go straight into the AQL kernarg packet. No per-launch H2D memcpy of
+  // `RuntimeContext` and no per-instruction kernel loads through a `RuntimeContext*`.
+  void *kernarg_payload = &ctx.get_context();
+  int kernarg_size = sizeof(RuntimeContext);
 
-  // Adstack-cache invalidation bump - see `bump_writes_for_kernel_llvm` in `program/adstack_size_expr_eval.{h,cpp}`.
-  bump_writes_for_kernel_llvm(executor->get_program(), &ctx, offloaded_tasks);
+  // Lazy device-side `RuntimeContext` shadow only for kernels that hit the adstack publish path. Forward-only
+  // kernels (Genesis hot path) skip both the malloc and the H2D entirely. The first reverse-mode kernel that needs
+  // it allocates once per handle and reuses on subsequent launches.
+  void *device_runtime_context_ptr_for_adstack = nullptr;
+  const bool needs_device_runtime_ctx = std::any_of(offloaded_tasks.begin(), offloaded_tasks.end(),
+                                                    [](const OffloadedTask &t) { return !t.ad_stack.allocas.empty(); });
+  if (needs_device_runtime_ctx) {
+    if (launcher_ctx.runtime_context_dev_ptr == nullptr) {
+      AMDGPUDriver::get_instance().malloc_async(&launcher_ctx.runtime_context_dev_ptr, sizeof(RuntimeContext), nullptr);
+    }
+    device_runtime_context_ptr_for_adstack = launcher_ctx.runtime_context_dev_ptr;
+    AMDGPUDriver::get_instance().memcpy_host_to_device_async(device_runtime_context_ptr_for_adstack, &ctx.get_context(),
+                                                             sizeof(RuntimeContext), nullptr);
+  }
+
+  // Adstack-cache invalidation bump - skipped on AMDGPU when this kernel is forward-only AND no autodiff kernel has
+  // ever been launched on this Program. The bump's only role is to invalidate cached metadata held in
+  // `prog->adstack_cache()`; that cache is populated exclusively from autodiff-kernel launches, so a program that
+  // has never seen one has nothing to invalidate. Genesis is in this regime and the iteration cost adds up at
+  // ~100 launches/step. Stays correct for mixed forward+reverse programs because the first reverse-mode launch
+  // through the same launcher flips the flag and re-arms the bump for all subsequent forward launches as well.
+  static thread_local bool any_autodiff_seen = false;
+  if (!any_autodiff_seen) {
+    any_autodiff_seen = needs_device_runtime_ctx;
+  }
+  if (any_autodiff_seen) {
+    bump_writes_for_kernel_llvm(executor->get_program(), &ctx, offloaded_tasks);
+  }
 
   if (ctx.graph_do_while_arg_id >= 0) {
     QD_ASSERT(ctx.graph_do_while_flag_dev_ptr);
-    launch_offloaded_tasks_with_do_while(ctx, amdgpu_module, offloaded_tasks, context_pointer, arg_size);
+    launch_offloaded_tasks_with_do_while(ctx, amdgpu_module, offloaded_tasks, launcher_ctx.resolved_funcs,
+                                         kernarg_payload, kernarg_size, device_runtime_context_ptr_for_adstack);
   } else {
-    launch_offloaded_tasks(ctx, amdgpu_module, offloaded_tasks, context_pointer, arg_size);
+    launch_offloaded_tasks(ctx, amdgpu_module, offloaded_tasks, launcher_ctx.resolved_funcs, kernarg_payload,
+                           kernarg_size, device_runtime_context_ptr_for_adstack);
   }
   QD_TRACE("Launching kernel");
   // Persistent scratch: no per-launch free for arg_buffer. The scratch lives until the launcher is destroyed.
