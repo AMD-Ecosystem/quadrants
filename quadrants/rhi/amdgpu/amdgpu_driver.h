@@ -42,7 +42,6 @@ constexpr uint32 HIP_JIT_MAX_REGISTERS = 0;
 constexpr uint32 HIP_POINTER_ATTRIBUTE_MEMORY_TYPE = 2;
 constexpr uint32 HIP_SUCCESS = 0;
 constexpr uint32 HIP_MEMORYTYPE_DEVICE = 1;
-constexpr uint32 HIP_MEMPOOL_ATTR_RELEASE_THRESHOLD = 4;
 
 std::string get_amdgpu_error_message(uint32 err);
 
@@ -126,10 +125,6 @@ class AMDGPUDriver : protected AMDGPUDriverBase {
   void (*driver_get_version)(int *);
 
   void (*runtime_get_version)(int *);
-
-  void malloc_async(void **ptr, size_t size, void *stream);
-
-  void mem_free_async(void *ptr, void *stream);
 
   bool detected();
 
