@@ -1778,16 +1778,12 @@ std::string TaskCodeGenLLVM::init_offloaded_task_function(OffloadedStmt *stmt, s
   current_loop_reentry = nullptr;
   current_while_after_loop = nullptr;
 
-  // AMDGPU's calling convention rejects byval struct-pointer kernel args at the verifier; the override
-  // (`kernel_argument_struct_in_kernarg() == true`) tells codegen to receive the RuntimeContext struct
-  // by value via kernarg and copy to an alloca on entry. CUDA / CPU keep the historical pointer type.
-  llvm::Type *context_param_type;
-  if (kernel_argument_struct_in_kernarg()) {
-    context_param_type = context_ty;
-  } else {
-    context_param_type = llvm::PointerType::get(context_ty, 0);
-  }
-  task_function_type = llvm::FunctionType::get(llvm::Type::getVoidTy(*llvm_context), {context_param_type}, false);
+  // NOTE: task_function_type is set up at the END of this function (after the adstack scan)
+  // to match upstream's kernel-launcher ABI, which always passes RuntimeContext by pointer.
+  // A previous AMD-side change here (kernel_argument_struct_in_kernarg() => receive
+  // by-value via kernarg) ABI-mismatches with upstream's kernel_launcher.cpp and traps
+  // with HSA_STATUS_ERROR_ILLEGAL_INSTRUCTION on the first launch.
+
 
   // Reset per-task heap-adstack state. `ad_stack_per_thread_stride_*` and `ad_stack_offsets_` are (re)populated by the
   // pre-scan below; `ad_stack_heap_base_*_llvm_` is emitted lazily when the first AdStack* stmt of this task fires.
@@ -1995,12 +1991,7 @@ std::string TaskCodeGenLLVM::init_offloaded_task_function(OffloadedStmt *stmt, s
   func_body_bb = llvm::BasicBlock::Create(*llvm_context, "body", func);
   builder->SetInsertPoint(func_body_bb);
 
-  if (kernel_argument_struct_in_kernarg()) {
-    context_val_alloca_ = create_entry_block_alloca(context_ty);
-    builder->CreateStore(kernel_args[0], context_val_alloca_);
-  } else {
-    context_val_alloca_ = nullptr;
-  }
+  context_val_alloca_ = nullptr;
   return task_kernel_name;
 }
 
@@ -3070,8 +3061,6 @@ llvm::Value *TaskCodeGenLLVM::get_arg(int i) {
 }
 
 llvm::Value *TaskCodeGenLLVM::get_context() {
-  if (context_val_alloca_)
-    return context_val_alloca_;
   return get_arg(0);
 }
 
