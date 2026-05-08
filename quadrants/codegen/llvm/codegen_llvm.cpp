@@ -1784,7 +1784,6 @@ std::string TaskCodeGenLLVM::init_offloaded_task_function(OffloadedStmt *stmt, s
   // by-value via kernarg) ABI-mismatches with upstream's kernel_launcher.cpp and traps
   // with HSA_STATUS_ERROR_ILLEGAL_INSTRUCTION on the first launch.
 
-
   // Reset per-task heap-adstack state. `ad_stack_per_thread_stride_*` and `ad_stack_offsets_` are (re)populated by the
   // pre-scan below; `ad_stack_heap_base_*_llvm_` is emitted lazily when the first AdStack* stmt of this task fires.
   // Clearing is important because a kernel with multiple offloaded tasks shares this visitor instance and a stale
