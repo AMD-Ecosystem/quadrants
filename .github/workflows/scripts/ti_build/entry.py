@@ -19,6 +19,31 @@ from .tinysh import Command, CommandFailed, nice, sh
 
 
 # -- code --
+def _get_version_defines() -> list[str]:
+    """
+    Resolve QD_VERSION_{MAJOR,MINOR,PATCH} the same way setup.py does, so
+    that quadrants/common/version.h.in (consumed via configure_file in
+    CMakeLists.txt) gets non-empty values. Without these, the generated
+    quadrants/common/version.h has empty `#define QD_VERSION_MAJOR` macros
+    and any source that compares against them fails to parse.
+    """
+    try:
+        from setuptools_scm import get_version as scm_get_version
+
+        version = scm_get_version()
+        parts = version.split("+")[0].split(".dev")[0].split("rc")[0].split("b")[0].split(".")
+        major = parts[0] if len(parts) > 0 else "0"
+        minor = parts[1] if len(parts) > 1 else "0"
+        patch = parts[2] if len(parts) > 2 else "0"
+    except Exception:
+        major, minor, patch = "0", "0", "0"
+    return [
+        f"-DQD_VERSION_MAJOR={major}",
+        f"-DQD_VERSION_MINOR={minor}",
+        f"-DQD_VERSION_PATCH={patch}",
+    ]
+
+
 @banner("Configure Quadrants (cmake only, no build)")
 def configure_only() -> None:
     """
@@ -42,6 +67,7 @@ def configure_only() -> None:
             "Ninja",
             "-DCMAKE_BUILD_TYPE=Release",
             "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+            *_get_version_defines(),
             *extra_args,
         )
 
