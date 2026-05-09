@@ -274,7 +274,20 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(std::unique_ptr<llvm::Modu
   // downstream of get_runtime() returning addrspace(0). Conservative walk
   // handles PHI/Select/AddrSpaceCast(srcAS=5)
   // and stops at LoadInst — secondary loads through GEPs ARE converted.
-  extra_fpm.add(new AMDGPUFlatToGlobalLoadStorePass());
+  //
+  // The pass is unsafe to run on the runtime bitcode: post-LLVM-22 the
+  // runtime module exposes complex inter-function arg flows
+  // (runtime_*/LLVMRuntime_* functions calling each other) that drive
+  // originatesFromScratch's argument-walk into deep / cyclic caller
+  // recursion and crash JIT init. User-kernel modules don't have this
+  // shape because the runtime functions are inlined into the kernel
+  // first, so the pass still gets to lower their loads/stores at
+  // user-kernel JIT time. Skip on the runtime module (detected by the
+  // presence of `runtime_initialize`, which is unique to the runtime BC).
+  const bool is_runtime_module = llvm_module->getFunction("runtime_initialize") != nullptr;
+  if (!is_runtime_module) {
+    extra_fpm.add(new AMDGPUFlatToGlobalLoadStorePass());
+  }
   extra_fpm.doInitialization();
   for (auto func = llvm_module->begin(); func != llvm_module->end(); ++func)
     extra_fpm.run(*func);
