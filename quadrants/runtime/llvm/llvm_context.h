@@ -134,8 +134,12 @@ class QuadrantsLLVMContext {
 
   void link_module_with_amdgpu_libdevice(std::unique_ptr<llvm::Module> &module);
 
+ public:
+  // Public so AMDGPU codegen can size-gate inlining of range_for body
+  // functions.
   static int num_instructions(llvm::Function *func);
 
+ private:
   void insert_nvvm_annotation(llvm::Function *func, std::string key, int val);
 
   std::unique_ptr<llvm::Module> clone_module_to_this_thread_context(llvm::Module *module);

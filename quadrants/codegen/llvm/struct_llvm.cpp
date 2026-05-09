@@ -193,6 +193,19 @@ void StructCompilerLLVM::generate_child_accessors(SNode &snode) {
                                       {llvm::PointerType::getUnqual(*llvm_ctx_)}, false);
 
     auto func = create_function(ft, snode.get_ch_from_parent_func_name());
+    // get_ch_from_parent is a 1-GEP wrapper per (parent, child) pair.
+    // Without alwaysinline, LLVM's cost-model inliner refuses to inline
+    // it on amdgpu because of an attribute mismatch (the helper inherits
+    // the conservative "1,128" amdgpu-flat-work-group-size fallback in
+    // jit_amdgpu.cpp, while the calling kernel is "64,64" or similar),
+    // leaving an s_swappc_b64 inside the inner loop. Forcing inline
+    // here matches what mark_inline() does for the range_for body and
+    // is unconditionally beneficial: the helper is small enough that
+    // call-site explosion is irrelevant, and inlining is required to
+    // expose the GEP for downstream constant-prop / coalescing.
+    func->removeFnAttr(llvm::Attribute::OptimizeNone);
+    func->removeFnAttr(llvm::Attribute::NoInline);
+    func->addFnAttr(llvm::Attribute::AlwaysInline);
 
     auto bb = llvm::BasicBlock::Create(*llvm_ctx_, "entry", func);
 

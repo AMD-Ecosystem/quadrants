@@ -232,10 +232,34 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
 
     // ``stmt->force_inline`` is set via ``qd.loop_config(force_inline=...)``
     // at the frontend:
-    //    +1 -> force inline
-    //     0 (default) or -1 -> do not inline; LLVM decides on its own
-    if (body && stmt->force_inline > 0) {
-      tlctx->mark_inline(body);
+    //    +1 -> force inline (always)
+    //     0 (default) -> force inline iff body is small. On amdgpu the
+    //                    body inherits "amdgpu-flat-work-group-size"
+    //                    "1,128" via the fallback path in jit_amdgpu.cpp
+    //                    while the calling kernel is "64,64" or similar;
+    //                    that mismatch blocks the cost-model inliner, so
+    //                    even tiny bodies get an s_swappc_b64 per outer
+    //                    iter. Force-inlining size-gated bodies is
+    //                    unconditionally beneficial here. Without this,
+    //                    Genesis's hot kernels regress ~13% because the
+    //                    range_for body becomes an out-of-line call per
+    //                    GPU thread per loop trip.
+    //    -1 -> never inline
+    if (body && stmt->force_inline >= 0) {
+      bool should_inline = stmt->force_inline > 0;
+      if (!should_inline) {
+        // 200 IR instructions is roughly the inliner's cost cutoff for
+        // a small loop body — beyond that we let LLVM's regular cost-model
+        // inliner decide instead of forcing it.
+        constexpr int kAmdgpuRangeForBodyInlineThreshold = 200;
+        const int instr_count = QuadrantsLLVMContext::num_instructions(body);
+        if (instr_count <= kAmdgpuRangeForBodyInlineThreshold) {
+          should_inline = true;
+        }
+      }
+      if (should_inline) {
+        tlctx->mark_inline(body);
+      }
     }
 
     auto epilogue = create_xlogue(stmt->tls_epilogue);
