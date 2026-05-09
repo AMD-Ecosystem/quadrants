@@ -40,6 +40,7 @@ def _get_expected_matrix_apis():
         "outer_product",
         "rows",
         "sum",
+        "tensor",
         "to_list",
         "to_numpy",
         "trace",
@@ -54,7 +55,9 @@ def _get_expected_matrix_apis():
 
 user_api = {}
 user_api[qd] = [
+    "Backend",
     "BitpackedFields",
+    "BufferView",
     "CRITICAL",
     "DEBUG",
     "DeviceCapability",
@@ -84,8 +87,12 @@ user_api[qd] = [
     "QuadrantsSyntaxError",
     "QuadrantsTypeError",
     "Template",
+    "Tensor",
+    "MatrixTensor",
+    "VectorTensor",
     "Vector",
     "VectorNdarray",
+    "wrap",
     "WARN",
     "abs",
     "acos",
@@ -155,6 +162,7 @@ user_api[qd] = [
     "ikl",
     "il",
     "init",
+    "interop",
     "int16",
     "int32",
     "int64",
@@ -221,6 +229,7 @@ user_api[qd] = [
     "tan",
     "tanh",
     "template",
+    "tensor",
     "tools",
     "types",
     "u1",
@@ -253,9 +262,11 @@ user_api[qd.Field] = [
     "fill",
     "from_numpy",
     "from_torch",
+    "layout",
     "parent",
     "shape",
     "snode",
+    "to_dlpack",
     "to_numpy",
     "to_torch",
 ]
@@ -352,6 +363,7 @@ user_api[qd.MatrixField] = [
     "from_numpy",
     "from_torch",
     "get_scalar_field",
+    "layout",
     "parent",
     "shape",
     "snode",
@@ -364,11 +376,15 @@ user_api[qd.MatrixNdarray] = [
     "element_shape",
     "fill",
     "from_numpy",
+    "from_torch",
     "get_type",
+    "layout",
+    "shape",
     "to_dlpack",
     "to_numpy",
+    "to_torch",
 ]
-user_api[qd.Ndarray] = ["copy_from", "element_shape", "fill", "get_type", "to_dlpack"]
+user_api[qd.Ndarray] = ["copy_from", "element_shape", "fill", "get_type", "layout", "shape", "to_dlpack"]
 user_api[qd.SNode] = [
     "bitmasked",
     "deactivate_all",
@@ -388,6 +404,7 @@ user_api[qd.ScalarField] = [
     "fill",
     "from_numpy",
     "from_torch",
+    "layout",
     "parent",
     "shape",
     "snode",
@@ -400,9 +417,13 @@ user_api[qd.ScalarNdarray] = [
     "element_shape",
     "fill",
     "from_numpy",
+    "from_torch",
     "get_type",
+    "layout",
+    "shape",
     "to_dlpack",
     "to_numpy",
+    "to_torch",
 ]
 user_api[qd.Struct] = ["entries", "field", "items", "keys", "methods", "to_dict"]
 user_api[qd.StructField] = [
@@ -413,9 +434,11 @@ user_api[qd.StructField] = [
     "from_torch",
     "get_member_field",
     "keys",
+    "layout",
     "parent",
     "shape",
     "snode",
+    "to_dlpack",
     "to_numpy",
     "to_torch",
 ]
@@ -424,10 +447,15 @@ user_api[qd.VectorNdarray] = [
     "element_shape",
     "fill",
     "from_numpy",
+    "from_torch",
     "get_type",
+    "layout",
+    "shape",
     "to_dlpack",
     "to_numpy",
+    "to_torch",
 ]
+user_api[qd.interop] = ["get_mps_command_queue"]
 user_api[qd.sparse] = ["grid", "usage"]
 
 
@@ -435,5 +463,5 @@ user_api[qd.sparse] = ["grid", "usage"]
 @test_utils.test(arch=qd.cpu)
 def test_api(src):
     expected = sorted(user_api[src])
-    actual = sorted([s for s in dir(src) if not s.startswith("_")])
+    actual = sorted([s for s in dir(src) if not s.startswith(("_", "@")) and s != "pytest_plugin"])
     assert actual == expected, f"Failed for API={src}:\n  expected={expected}\n  actual={actual}"

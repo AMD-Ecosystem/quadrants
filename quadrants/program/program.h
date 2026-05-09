@@ -1,14 +1,18 @@
-// Program  - Quadrants program execution context
+// Program - Quadrants program execution context
 
 #pragma once
 
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <atomic>
 #include <stack>
 #include <shared_mutex>
+#include <string>
+#include <vector>
 
 #define QD_RUNTIME_HOST
+#include "quadrants/ir/adstack_size_expr.h"
 #include "quadrants/ir/frontend_ir.h"
 #include "quadrants/ir/ir.h"
 #include "quadrants/ir/type_factory.h"
@@ -29,6 +33,7 @@
 
 namespace quadrants::lang {
 
+class AdStackCache;
 class StructCompiler;
 
 /**
@@ -49,15 +54,14 @@ class QD_DLL_EXPORT Program {
   using Kernel = quadrants::lang::Kernel;
 
   uint64 *result_buffer{nullptr};  // Note that this result_buffer is used
-                                   // only for runtime JIT functions (e.g.
-                                   // `runtime_memory_allocate_aligned`)
+                                   // only for runtime JIT functions (e.g. `runtime_memory_allocate_aligned`)
 
   std::vector<std::unique_ptr<Kernel>> kernels;
 
   std::unique_ptr<KernelProfilerBase> profiler{nullptr};
 
-  // Note: for now we let all Programs share a single TypeFactory for smooth
-  // migration. In the future each program should have its own copy.
+  // Note: for now we let all Programs share a single TypeFactory for smooth migration. In the future each program
+  // should have its own copy.
   static TypeFactory &get_type_factory();
 
   Program() : Program(default_compile_config.arch) {
@@ -80,8 +84,7 @@ class QD_DLL_EXPORT Program {
 
   KernelProfilerQueryResult query_kernel_profile_info(const std::string &name) {
     KernelProfilerQueryResult query_result;
-    profiler->query(name, query_result.counter, query_result.min,
-                    query_result.max, query_result.avg);
+    profiler->query(name, query_result.counter, query_result.min, query_result.max, query_result.avg);
     return query_result;
   }
 
@@ -101,7 +104,18 @@ class QD_DLL_EXPORT Program {
     return profiler.get();
   }
 
+  // Drain the backend command queue. Does not raise; for internal use only.
   void synchronize();
+
+  // Drain the queue and raise on any pending user-visible assert (e.g. adstack overflow). Bound to `qd.sync()`.
+  void synchronize_and_assert();
+
+  // Per-Quadrants-Python-entry poll for any pending adstack overflow signal. Unlike `synchronize_and_assert`
+  // this does NOT drain the queue: it only reads the pinned-host overflow flag (cheap host atomic load) and
+  // raises if set. Wired at every host-read entry point (`Ndarray::read`, `SNodeRwAccessorsBank` reads via
+  // `Program::launch_kernel`'s built-in poll) so a DLPack-bypass overflow surfaces within one entry of the
+  // offending launch even when the user never calls `qd.sync()`.
+  void check_adstack_overflow_and_assert();
 
   StreamSemaphore flush();
 
@@ -114,11 +128,10 @@ class QD_DLL_EXPORT Program {
 
   void dump_cache_data_to_disk();
 
-  const CompiledKernelData *load_fast_cache(
-      const std::string &checksum,
-      const std::string &kernel_name,
-      const CompileConfig &compile_config,
-      const DeviceCapabilityConfig &device_caps);
+  const CompiledKernelData *load_fast_cache(const std::string &checksum,
+                                            const std::string &kernel_name,
+                                            const CompileConfig &compile_config,
+                                            const DeviceCapabilityConfig &device_caps);
 
   Kernel &create_kernel(const std::function<void(Kernel *)> &body,
                         const std::string &name = "",
@@ -130,25 +143,26 @@ class QD_DLL_EXPORT Program {
                                const DeviceCapabilityConfig &device_caps,
                                const Kernel &kernel_def);
 
-  void launch_kernel(const CompiledKernelData &compiled_kernel_data,
-                     LaunchContextBuilder &ctx);
+  void launch_kernel(const CompiledKernelData &compiled_kernel_data, LaunchContextBuilder &ctx);
 
-  std::size_t get_cuda_graph_cache_size() {
-    return program_impl_->get_kernel_launcher().get_cuda_graph_cache_size();
+  std::size_t get_graph_cache_size() {
+    return program_impl_->get_kernel_launcher().get_graph_cache_size();
   }
 
-  bool get_cuda_graph_cache_used_on_last_call() {
-    return program_impl_->get_kernel_launcher()
-        .get_cuda_graph_cache_used_on_last_call();
+  bool get_graph_cache_used_on_last_call() {
+    return program_impl_->get_kernel_launcher().get_graph_cache_used_on_last_call();
   }
 
   size_t get_num_offloaded_tasks_on_last_call() const {
     return num_offloaded_tasks_on_last_call_;
   }
 
-  std::size_t get_cuda_graph_num_nodes_on_last_call() {
-    return program_impl_->get_kernel_launcher()
-        .get_cuda_graph_num_nodes_on_last_call();
+  std::size_t get_graph_num_nodes_on_last_call() {
+    return program_impl_->get_kernel_launcher().get_graph_num_nodes_on_last_call();
+  }
+
+  std::size_t get_graph_total_builds() {
+    return program_impl_->get_kernel_launcher().get_graph_total_builds();
   }
 
   DeviceCapabilityConfig get_device_caps() {
@@ -184,8 +198,7 @@ class QD_DLL_EXPORT Program {
 
   static int default_block_dim(const CompileConfig &config);
 
-  // Note this method is specific to LlvmProgramImpl, but we keep it here since
-  // it's exposed to python.
+  // Note this method is specific to LlvmProgramImpl, but we keep it here since it's exposed to python.
   void print_memory_profiler_info();
 
   // Returns zero if the SNode is statically allocated
@@ -198,6 +211,22 @@ class QD_DLL_EXPORT Program {
   inline SNodeRwAccessorsBank &get_snode_rw_accessors_bank() {
     return snode_rw_accessors_bank_;
   }
+
+  // Look up an `SNode` in this `Program`'s snode trees by its global `SNode::id`. Used by the host-side adstack
+  // size-expression evaluator to rehydrate an `SNode *` from a `snode_id` that survived the offline cache. Linear
+  // over all snode trees; called at most once per adstack leaf per kernel launch so the cost is negligible in
+  // practice.
+  SNode *get_snode_by_id(int snode_id);
+
+  // Adstack-specific caching: per-task adstack-sizer metadata caches (SPIR-V + LLVM-GPU), encoded SPIR-V bytecode
+  // cache, per-launch SizeExpr-eval result cache, and per-snode / per-DeviceAllocation generation counters that drive
+  // precise invalidation. Defined in `program/adstack_size_expr_eval.h`. Lifecycle matches `Program`.
+  AdStackCache &adstack_cache() {
+    return *adstack_cache_;
+  }
+
+  // Adstack-overflow identity registry, diagnostic classifier, and per-launch snapshot all live on
+  // `AdStackCache`. Callers route through `prog->adstack_cache().method(...)`.
 
   /**
    * Destroys a new SNode tree.
@@ -256,17 +285,15 @@ class QD_DLL_EXPORT Program {
   }
 
   // TODO: do we still need result_buffer?
-  DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
-                                             uint64 *result_buffer) {
+  DeviceAllocation allocate_memory_on_device(std::size_t alloc_size, uint64 *result_buffer) {
     return program_impl_->allocate_memory_on_device(alloc_size, result_buffer);
   }
 
-  Ndarray *create_ndarray(
-      const DataType type,
-      const std::vector<int> &shape,
-      ExternalArrayLayout layout = ExternalArrayLayout::kNull,
-      bool zero_fill = false,
-      const DebugInfo &dbg_info = DebugInfo());
+  Ndarray *create_ndarray(const DataType type,
+                          const std::vector<int> &shape,
+                          ExternalArrayLayout layout = ExternalArrayLayout::kNull,
+                          bool zero_fill = false,
+                          const DebugInfo &dbg_info = DebugInfo());
 
   std::string get_kernel_return_data_layout() {
     return program_impl_->get_kernel_return_data_layout();
@@ -276,9 +303,8 @@ class QD_DLL_EXPORT Program {
     return program_impl_->get_kernel_argument_data_layout();
   };
 
-  std::pair<const StructType *, size_t> get_struct_type_with_data_layout(
-      const StructType *old_ty,
-      const std::string &layout);
+  std::pair<const StructType *, size_t> get_struct_type_with_data_layout(const StructType *old_ty,
+                                                                         const std::string &layout);
 
   void delete_ndarray(Ndarray *ndarray);
 
@@ -295,9 +321,8 @@ class QD_DLL_EXPORT Program {
    *  @params op The lambda that is invoked to construct the custom compute Op
    *  @params image_refs The image resource references used in this compute Op
    */
-  void enqueue_compute_op_lambda(
-      std::function<void(Device *device, CommandList *cmdlist)> op,
-      const std::vector<ComputeOpImageRef> &image_refs);
+  void enqueue_compute_op_lambda(std::function<void(Device *device, CommandList *cmdlist)> op,
+                                 const std::vector<ComputeOpImageRef> &image_refs);
 
   /**
    * TODO(zhanlue): Remove this interface
@@ -318,12 +343,11 @@ class QD_DLL_EXPORT Program {
     return ndarrays_.size();
   }
 
-  // TODO(zhanlue): Move these members and corresponding interfaces to
-  // ProgramImpl Ideally, Program should serve as a pure interface class and all
-  // the implementations should fall inside ProgramImpl
+  // TODO(zhanlue): Move these members and corresponding interfaces to ProgramImpl Ideally, Program should serve as a
+  // pure interface class and all the implementations should fall inside ProgramImpl
   //
-  // Once we migrated these implementations to ProgramImpl, lower-level objects
-  // could store ProgramImpl rather than Program.
+  // Once we migrated these implementations to ProgramImpl, lower-level objects could store ProgramImpl rather than
+  // Program.
 
  private:
   CompileConfig compile_config_;
@@ -337,6 +361,12 @@ class QD_DLL_EXPORT Program {
   SNodeRwAccessorsBank snode_rw_accessors_bank_;
 
   std::vector<std::unique_ptr<SNodeTree>> snode_trees_;
+  // Lazy cache for `get_snode_by_id`. Invalidated by `add_snode_tree` and `destroy_snode_tree`.
+  std::unordered_map<int, SNode *> snode_id_cache_;
+  // Adstack-specific state (per-task metadata caches, bytecode cache, size-expr results, generation counters,
+  // identity registry, diagnose-time launch snapshot). All adstack-specific surface lives in
+  // `program/adstack_size_expr_eval.{h,cpp}`; routed through `adstack_cache()` getter.
+  std::unique_ptr<AdStackCache> adstack_cache_;
   std::stack<int> free_snode_tree_ids_;
 
   std::vector<std::unique_ptr<Function>> functions_;
