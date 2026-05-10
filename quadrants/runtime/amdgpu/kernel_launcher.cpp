@@ -269,33 +269,63 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     // Malloc_Async and Free_Async are available after ROCm 5.4
     ctx.get_context().result_buffer = (uint64 *)device_result_buffer;
   }
-  // Per-handle persistent device-side arg_buffer scratch. The arg_buffer
-  // contents change every launch but the *backing storage* doesn't need
-  // to be reallocated on the GPU. Stream ordering on the default stream
-  // (H2D queued before launch, next H2D queued after this launch) makes
-  // it safe to reuse the same device buffer for back-to-back launches --
-  // the next H2D won't overwrite anything the previous kernel still needs.
-  // Storing the device pointer + capacity in the per-handle Context (rather
-  // than thread-local-shared) eliminates a malloc_async + mem_free_async
-  // pair on every kernel launch and gives each kernel its own buffer for
-  // the byte-hash cache that follows.
+  // Per-handle persistent device-side arg_buffer scratch + byte-hash cache.
+  // In Genesis steady state the arg_buffer for a given kernel handle is
+  // byte-identical between physics steps (ndarray shapes are stable, data
+  // pointers are persistent, scalars fixed). FNV-1a the host blob and skip
+  // hipMemcpyHtoDAsync when the hash + size match the cached values for
+  // this handle. Disable via QD_AMDGPU_ARG_BUFFER_HASH_CACHE=0 if anything
+  // ever regresses on this fast path.
   char *device_arg_buffer = nullptr;
   if (ctx.arg_buffer_size > 0) {
     if (ctx.arg_buffer_size > launcher_ctx.arg_buffer_capacity) {
       if (launcher_ctx.arg_buffer_dev_ptr != nullptr) {
-        AMDGPUDriver::get_instance().mem_free_async(launcher_ctx.arg_buffer_dev_ptr, nullptr);
+        AMDGPUDriver::get_instance().mem_free_async(
+            launcher_ctx.arg_buffer_dev_ptr, nullptr);
       }
       // Round up to amortize future growth.
       std::size_t new_cap = std::max<std::size_t>(ctx.arg_buffer_size, 256);
       while (new_cap < ctx.arg_buffer_size) {
         new_cap *= 2;
       }
-      AMDGPUDriver::get_instance().malloc_async(&launcher_ctx.arg_buffer_dev_ptr, new_cap, nullptr);
+      AMDGPUDriver::get_instance().malloc_async(
+          &launcher_ctx.arg_buffer_dev_ptr, new_cap, nullptr);
       launcher_ctx.arg_buffer_capacity = new_cap;
+      // Cache invalidation: the new device buffer is uninitialised, so any
+      // prior cached_hash that matched the freed buffer's contents no
+      // longer reflects what is on the device.
+      launcher_ctx.arg_buffer_cached_hash = 0;
+      launcher_ctx.arg_buffer_cached_size = 0;
     }
     device_arg_buffer = static_cast<char *>(launcher_ctx.arg_buffer_dev_ptr);
-    AMDGPUDriver::get_instance().memcpy_host_to_device_async(device_arg_buffer, ctx.get_context().arg_buffer,
-                                                             ctx.arg_buffer_size, nullptr);
+    static const bool arg_buffer_hash_cache_enabled = []() {
+      const char *e = std::getenv("QD_AMDGPU_ARG_BUFFER_HASH_CACHE");
+      return e == nullptr || std::string(e) != "0";
+    }();
+    bool need_h2d = true;
+    if (arg_buffer_hash_cache_enabled) {
+      // FNV-1a 64-bit. ~1 cycle/byte on host vs ~7.8 us PCIe round-trip per
+      // copyBuffer in rocprof, so even kilobyte-scale bodies are net-positive
+      // when the cache hits.
+      const uint8_t *host_buf =
+          reinterpret_cast<const uint8_t *>(ctx.get_context().arg_buffer);
+      uint64_t h = 0xcbf29ce484222325ULL;
+      for (std::size_t i = 0; i < ctx.arg_buffer_size; ++i) {
+        h = (h ^ host_buf[i]) * 0x100000001b3ULL;
+      }
+      if (h == launcher_ctx.arg_buffer_cached_hash &&
+          ctx.arg_buffer_size == launcher_ctx.arg_buffer_cached_size) {
+        need_h2d = false;
+      } else {
+        launcher_ctx.arg_buffer_cached_hash = h;
+        launcher_ctx.arg_buffer_cached_size = ctx.arg_buffer_size;
+      }
+    }
+    if (need_h2d) {
+      AMDGPUDriver::get_instance().memcpy_host_to_device_async(
+          device_arg_buffer, ctx.get_context().arg_buffer, ctx.arg_buffer_size,
+          nullptr);
+    }
     ctx.get_context().arg_buffer = device_arg_buffer;
   }
 
