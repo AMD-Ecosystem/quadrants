@@ -182,15 +182,17 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       i32_ops[AtomicOpType::bit_or] = llvm::AtomicRMWInst::BinOp::Or;
       i32_ops[AtomicOpType::bit_xor] = llvm::AtomicRMWInst::BinOp::Xor;
       if (i32_ops.find(op) != i32_ops.end()) {
-        return builder->CreateAtomicRMW(
-            i32_ops.at(op), dest, val, llvm::MaybeAlign(0),
-            llvm::AtomicOrdering::SequentiallyConsistent);
+        return create_native_amdgpu_integer_atomic(i32_ops.at(op), dest, val);
       }
     } else if (prim_type == PrimitiveTypeID::f32) {
       if (op == AtomicOpType::add) {
-        return builder->CreateAtomicRMW(
-            llvm::AtomicRMWInst::FAdd, dest, val, llvm::MaybeAlign(0),
-            llvm::AtomicOrdering::SequentiallyConsistent);
+        // gfx940+ has native global_atomic_add_f32; the backend only
+        // selects it when ordering is at most monotonic, syncscope is
+        // bounded (agent), and the operand isn't fine-grained / remote.
+        // Without these gates we got a global_atomic_cmpswap retry
+        // loop, the same pattern that made i32 atomic_or 30x slow.
+        return create_native_amdgpu_integer_atomic(
+            llvm::AtomicRMWInst::FAdd, dest, val);
       } else if (op == AtomicOpType::min) {
         return atomic_op_using_cas(
             dest, val,
@@ -204,6 +206,102 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       }
     }
     return nullptr;
+  }
+
+  // Emit an AMDGPU-friendly atomicrmw for i32 ops. The base class
+  // integral_type_atomic uses (system, seq_cst), which the AMDGPU LLVM
+  // backend conservatively lowers to a global_atomic_cmpswap + retry
+  // loop for or/min/and/xor on global memory -- about 30x slower than
+  // the native global_atomic_or / global_atomic_smin instruction at the
+  // same contention level on gfx942 (see HEADLINES.md "Opp 3"). The
+  // monotonic + agent combination matches what hand-rolled HIP / OpenCL
+  // emits for these ops and unlocks the native instruction. atomic_add
+  // is unaffected -- it lowers to global_atomic_add even at seq_cst
+  // because of a backend special case -- but using the same ordering
+  // here keeps every i32 atomic in this codegen on the fast path.
+  llvm::Value *create_native_amdgpu_integer_atomic(
+      llvm::AtomicRMWInst::BinOp op,
+      llvm::Value *dest,
+      llvm::Value *val) {
+    auto *atomic = builder->CreateAtomicRMW(
+        op, dest, val, llvm::MaybeAlign(0),
+        llvm::AtomicOrdering::Monotonic);
+    atomic->setSyncScopeID(
+        llvm_context->getOrInsertSyncScopeID("agent"));
+    // gfx940+ gates native f32 atomic_add on absence of fine-grained
+    // and remote (xgmi peer) memory; mark the instruction so the
+    // backend selects the native instruction. Harmless on integer ops.
+    auto *empty_md = llvm::MDNode::get(*llvm_context, {});
+    atomic->setMetadata("amdgpu.no.fine.grained.memory", empty_md);
+    atomic->setMetadata("amdgpu.no.remote.memory", empty_md);
+    return atomic;
+  }
+
+  // Override the base integer atomic lowering on amdgpu so that the
+  // non-reduction path (i.e. ordinary @qd.kernel atomic_or / atomic_min
+  // calls that don't get marked is_reduction by make_thread_local) also
+  // lands on the native global_atomic_* instruction. See
+  // create_native_amdgpu_integer_atomic above.
+  llvm::Value *integral_type_atomic(AtomicOpStmt *stmt) override {
+    if (!is_integral(stmt->val->ret_type)) {
+      return nullptr;
+    }
+    if (stmt->op_type == AtomicOpType::mul) {
+      // CAS path for mul -- LLVM has no native atomic mul.
+      return atomic_op_using_cas(
+          llvm_val[stmt->dest], llvm_val[stmt->val],
+          [&](auto v1, auto v2) { return builder->CreateMul(v1, v2); },
+          stmt->val->ret_type);
+    }
+    std::unordered_map<AtomicOpType, llvm::AtomicRMWInst::BinOp> bin_op;
+    bin_op[AtomicOpType::add] = llvm::AtomicRMWInst::BinOp::Add;
+    if (is_signed(stmt->val->ret_type)) {
+      bin_op[AtomicOpType::min] = llvm::AtomicRMWInst::BinOp::Min;
+      bin_op[AtomicOpType::max] = llvm::AtomicRMWInst::BinOp::Max;
+    } else {
+      bin_op[AtomicOpType::min] = llvm::AtomicRMWInst::BinOp::UMin;
+      bin_op[AtomicOpType::max] = llvm::AtomicRMWInst::BinOp::UMax;
+    }
+    bin_op[AtomicOpType::bit_and] = llvm::AtomicRMWInst::BinOp::And;
+    bin_op[AtomicOpType::bit_or] = llvm::AtomicRMWInst::BinOp::Or;
+    bin_op[AtomicOpType::bit_xor] = llvm::AtomicRMWInst::BinOp::Xor;
+    QD_ASSERT(bin_op.find(stmt->op_type) != bin_op.end());
+    return create_native_amdgpu_integer_atomic(
+        bin_op.at(stmt->op_type), llvm_val[stmt->dest], llvm_val[stmt->val]);
+  }
+
+  // Override real_type_atomic to route f32 atomic_add through the
+  // native global_atomic_add_f32 path on gfx940+. The base-class
+  // implementation emits atomicrmw fadd seq_cst, which the AMDGPU
+  // backend conservatively lowers to a global_atomic_cmpswap retry
+  // loop -- the same pattern that made i32 atomic_or 30x slow. f64
+  // atomic_add lands on cmpswap_x2 either way (gfx942 has no
+  // global_atomic_add_f64), but using monotonic + agent here keeps
+  // the IR consistent and lets the LDS-resident dst path use LDS
+  // atomic_add_f64 when applicable. f32/f64 min/max remain on CAS
+  // because gfx942 has no HW float min/max atomics.
+  llvm::Value *real_type_atomic(AtomicOpStmt *stmt) override {
+    if (!is_real(stmt->val->ret_type)) {
+      return nullptr;
+    }
+    PrimitiveTypeID prim_type =
+        stmt->val->ret_type->cast<PrimitiveType>()->type;
+    AtomicOpType op = stmt->op_type;
+    if (prim_type == PrimitiveTypeID::f16) {
+      // Defer to the base class; gfx942 doesn't have HW f16 atomics
+      // outside the packed pk_add_f16 path which Quadrants doesn't
+      // use, and the base-class CAS lowering is correct for f16.
+      return TaskCodeGenLLVM::real_type_atomic(stmt);
+    }
+    if (op == AtomicOpType::add &&
+        (prim_type == PrimitiveTypeID::f32 ||
+         prim_type == PrimitiveTypeID::f64)) {
+      return create_native_amdgpu_integer_atomic(
+          llvm::AtomicRMWInst::FAdd, llvm_val[stmt->dest],
+          llvm_val[stmt->val]);
+    }
+    // f32/f64 min/max/mul stay on the base-class CAS path.
+    return TaskCodeGenLLVM::real_type_atomic(stmt);
   }
 
   void visit(RangeForStmt *for_stmt) override {
