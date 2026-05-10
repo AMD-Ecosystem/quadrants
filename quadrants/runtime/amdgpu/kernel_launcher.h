@@ -14,6 +14,13 @@ class KernelLauncher : public LLVM::KernelLauncher {
     const std::vector<std::pair<int, Callable::Parameter>> *parameters;
     std::vector<OffloadedTask> offloaded_tasks;
     std::vector<void *> resolved_funcs;
+    // Per-handle persistent device-side arg_buffer scratch. The pre-existing
+    // implementation used a single thread_local buffer shared across all
+    // kernel handles; moving the buffer into Context (per-handle) lets each
+    // kernel keep its own device address with its own high-water-mark
+    // capacity and prepares the launcher for per-handle byte-hash caching.
+    void *arg_buffer_dev_ptr{nullptr};
+    std::size_t arg_buffer_capacity{0};
   };
 
  public:
