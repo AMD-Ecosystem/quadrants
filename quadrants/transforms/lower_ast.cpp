@@ -275,14 +275,29 @@ class LowerAST : public IRVisitor {
       Stmt *loop_index =
           new_statements.push_back<LoopIndexStmt>(new_for.get(), 0);
       for (int i = (int)shape.size() - 1; i >= 0; i--) {
-        Stmt *loop_var = new_statements.push_back<BinaryOpStmt>(
-            BinaryOpType::mod, loop_index, shape[i]);
+        // Range bound argument: end = prod(shape), so after the loop
+        // has divided loop_index by shape[ndim-1..i+1] the remaining
+        // value is provably < shape[i] for the outermost (i == 0)
+        // axis. Skipping the mod for i == 0 lets the codegen see
+        // loop_var == loop_index there, which avoids a runtime srem /
+        // sdiv against the dynamic shape (the most expensive part of
+        // an inner-loop iteration on AMDGPU). The intermediate axes
+        // still need the mod because their value is the full unwrapped
+        // index modulo the per-axis stride.
+        Stmt *loop_var = (i == 0)
+                             ? loop_index
+                             : new_statements.push_back<BinaryOpStmt>(
+                                   BinaryOpType::mod, loop_index, shape[i]);
         new_for->body->local_var_to_stmt[stmt->loop_var_ids[i]] = loop_var;
         std::vector<uint32_t> decoration = {
             uint32_t(DecorationStmt::Decoration::kLoopUnique), uint32_t(i)};
         new_statements.push_back<DecorationStmt>(loop_var, decoration);
-        loop_index = new_statements.push_back<BinaryOpStmt>(
-            BinaryOpType::div, loop_index, shape[i]);
+        if (i > 0) {
+          // The final div (i == 0) feeds nothing -- the loop exits
+          // after binding the outermost axis -- so we omit it.
+          loop_index = new_statements.push_back<BinaryOpStmt>(
+              BinaryOpType::div, loop_index, shape[i]);
+        }
       }
       new_for->body->insert(std::move(new_statements), 0);
       fctx.push_back(std::move(new_for));
