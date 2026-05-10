@@ -14,13 +14,20 @@ class KernelLauncher : public LLVM::KernelLauncher {
     const std::vector<std::pair<int, Callable::Parameter>> *parameters;
     std::vector<OffloadedTask> offloaded_tasks;
     std::vector<void *> resolved_funcs;
-    // Per-handle persistent device-side arg_buffer scratch. The pre-existing
-    // implementation used a single thread_local buffer shared across all
-    // kernel handles; moving the buffer into Context (per-handle) lets each
-    // kernel keep its own device address with its own high-water-mark
-    // capacity and prepares the launcher for per-handle byte-hash caching.
+    // Per-handle persistent device-side arg_buffer scratch + byte-hash
+    // cache. The pre-existing implementation used a single thread_local
+    // buffer shared across all kernel handles; with the buffer shared,
+    // hashing host bytes to skip duplicate H2D never wins because
+    // consecutive Genesis launches hit different kernels with different
+    // arg_buffers, so the cached hash never matches. Storing the buffer
+    // per handle lets each kernel keep its own device address; consecutive
+    // launches of the SAME kernel can then byte-compare and skip the H2D
+    // when shape + ndarray-pointer slots are unchanged. Reset on
+    // (re)allocation.
     void *arg_buffer_dev_ptr{nullptr};
     std::size_t arg_buffer_capacity{0};
+    uint64_t arg_buffer_cached_hash{0};
+    std::size_t arg_buffer_cached_size{0};
   };
 
  public:
