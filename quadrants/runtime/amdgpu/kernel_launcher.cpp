@@ -269,36 +269,34 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     // Malloc_Async and Free_Async are available after ROCm 5.4
     ctx.get_context().result_buffer = (uint64 *)device_result_buffer;
   }
-  // Persistent thread-local device arg buffer. The arg buffer
+  // Per-handle persistent device-side arg_buffer scratch. The arg_buffer
   // contents change every launch but the *backing storage* doesn't need
   // to be reallocated on the GPU. Stream ordering on the default stream
   // (H2D queued before launch, next H2D queued after this launch) makes
-  // it safe to reuse the same device buffer for back-to-back launches —
+  // it safe to reuse the same device buffer for back-to-back launches --
   // the next H2D won't overwrite anything the previous kernel still needs.
-  //
-  // This eliminates a malloc_async + mem_free_async pair on every kernel
-  // launch.
-  thread_local char *persistent_dev_arg_buf = nullptr;
-  thread_local std::size_t persistent_dev_arg_buf_cap = 0;
+  // Storing the device pointer + capacity in the per-handle Context (rather
+  // than thread-local-shared) eliminates a malloc_async + mem_free_async
+  // pair on every kernel launch and gives each kernel its own buffer for
+  // the byte-hash cache that follows.
+  char *device_arg_buffer = nullptr;
   if (ctx.arg_buffer_size > 0) {
-    if (ctx.arg_buffer_size > persistent_dev_arg_buf_cap) {
-      if (persistent_dev_arg_buf) {
-        AMDGPUDriver::get_instance().mem_free_async(persistent_dev_arg_buf,
-                                                    nullptr);
+    if (ctx.arg_buffer_size > launcher_ctx.arg_buffer_capacity) {
+      if (launcher_ctx.arg_buffer_dev_ptr != nullptr) {
+        AMDGPUDriver::get_instance().mem_free_async(launcher_ctx.arg_buffer_dev_ptr, nullptr);
       }
       // Round up to amortize future growth.
       std::size_t new_cap = std::max<std::size_t>(ctx.arg_buffer_size, 256);
       while (new_cap < ctx.arg_buffer_size) {
         new_cap *= 2;
       }
-      AMDGPUDriver::get_instance().malloc_async(
-          (void **)&persistent_dev_arg_buf, new_cap, nullptr);
-      persistent_dev_arg_buf_cap = new_cap;
+      AMDGPUDriver::get_instance().malloc_async(&launcher_ctx.arg_buffer_dev_ptr, new_cap, nullptr);
+      launcher_ctx.arg_buffer_capacity = new_cap;
     }
-    AMDGPUDriver::get_instance().memcpy_host_to_device_async(
-        persistent_dev_arg_buf, ctx.get_context().arg_buffer,
-        ctx.arg_buffer_size, nullptr);
-    ctx.get_context().arg_buffer = persistent_dev_arg_buf;
+    device_arg_buffer = static_cast<char *>(launcher_ctx.arg_buffer_dev_ptr);
+    AMDGPUDriver::get_instance().memcpy_host_to_device_async(device_arg_buffer, ctx.get_context().arg_buffer,
+                                                             ctx.arg_buffer_size, nullptr);
+    ctx.get_context().arg_buffer = device_arg_buffer;
   }
 
   if (ctx.graph_do_while_arg_id >= 0) {
