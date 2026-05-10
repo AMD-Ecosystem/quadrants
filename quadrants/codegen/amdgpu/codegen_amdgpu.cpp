@@ -340,10 +340,33 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
 
     // ``stmt->force_inline`` is set via ``qd.loop_config(force_inline=...)``
     // at the frontend:
-    //    +1 -> force inline
-    //     0 (default) or -1 -> do not inline; LLVM decides on its own
-    if (body && stmt->force_inline > 0) {
-      tlctx->mark_inline(body);
+    //    +1 -> force inline (always)
+    //     0 (default) -> force inline iff body is small. On amdgpu the
+    //                    body inherits "amdgpu-flat-work-group-size"
+    //                    "1,128" via the fallback path in jit_amdgpu.cpp
+    //                    while the calling kernel is "64,64" or similar;
+    //                    that mismatch blocks the cost-model inliner, so
+    //                    even tiny bodies get an s_swappc_b64 per outer
+    //                    iter. Force-inlining is unconditionally
+    //                    beneficial for tiny bodies but regresses huge
+    //                    bodies (e.g. solve_body, ~200+ insts) by
+    //                    blowing past the VGPR sweet spot. Gate on a
+    //                    conservative size threshold so SAXPY-class
+    //                    bodies inline but Genesis-class solver bodies
+    //                    still go through LLVM's cost model.
+    //    -1 -> do not inline (explicit user opt-out)
+    if (body && stmt->force_inline >= 0) {
+      bool should_inline = (stmt->force_inline > 0);
+      if (!should_inline) {
+        constexpr int kAmdgpuRangeForBodyInlineThreshold = 200;
+        if (QuadrantsLLVMContext::num_instructions(body) <
+            kAmdgpuRangeForBodyInlineThreshold) {
+          should_inline = true;
+        }
+      }
+      if (should_inline) {
+        tlctx->mark_inline(body);
+      }
     }
 
     auto epilogue = create_xlogue(stmt->tls_epilogue);

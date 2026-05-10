@@ -101,6 +101,8 @@ class QuadrantsLLVMContext {
 
   static void print_huge_functions(llvm::Module *module);
 
+  static int num_instructions(llvm::Function *func);
+
   // remove all functions that are not (directly & indirectly) used by those
   // with export_indicator(func_name) = true
   static void eliminate_unused_functions(
@@ -143,8 +145,6 @@ class QuadrantsLLVMContext {
   void link_module_with_cuda_libdevice(std::unique_ptr<llvm::Module> &module);
 
   void link_module_with_amdgpu_libdevice(std::unique_ptr<llvm::Module> &module);
-
-  static int num_instructions(llvm::Function *func);
 
   void insert_nvvm_annotation(llvm::Function *func, std::string key, int val);
 
