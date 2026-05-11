@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -13,6 +14,27 @@
 
 namespace quadrants::lang {
 namespace amdgpu {
+
+namespace {
+// Opt-out for the per-handle arg-buffer H2D cache. Cache is enabled by
+// default. Set this env var to "1" / "true" to force every launch to
+// re-do the H2D (i.e., revert to the pre-cache behavior).
+//
+// Use this if the caller is running on a non-default stream that is being
+// captured into a HIP graph (`hipStreamBeginCapture`): the cache skips the
+// memcpy_h2d when host bytes match the previous launch, so the captured
+// graph would be missing those H2D nodes and replay would observe stale
+// dev_arg_buf state.
+//
+// Read once at first use; no per-launch env lookup cost.
+bool launcher_arg_cache_disabled() {
+  static const bool disabled = []() {
+    const char *flag = std::getenv("QD_AMDGPU_DISABLE_LAUNCHER_ARG_CACHE");
+    return flag != nullptr && flag[0] != '\0' && flag[0] != '0';
+  }();
+  return disabled;
+}
+}  // namespace
 
 namespace exp12_diag {
 static const bool diag_enabled = []() {
@@ -269,21 +291,32 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     // Malloc_Async and Free_Async are available after ROCm 5.4
     ctx.get_context().result_buffer = (uint64 *)device_result_buffer;
   }
-  // Persistent thread-local device arg buffer. The arg buffer
-  // contents change every launch but the *backing storage* doesn't need
-  // to be reallocated on the GPU. Stream ordering on the default stream
-  // (H2D queued before launch, next H2D queued after this launch) makes
-  // it safe to reuse the same device buffer for back-to-back launches —
-  // the next H2D won't overwrite anything the previous kernel still needs.
+  // Per-handle persistent device arg buffer + skip H2D when host bytes are
+  // byte-identical to the previous launch of THIS handle. Saves one async
+  // memcpy_h2d per launch when a kernel is repeatedly called with the same
+  // ndarray pointers + scene-static scalars (the common per-step pattern in
+  // long-running simulations).
   //
-  // This eliminates a malloc_async + mem_free_async pair on every kernel
-  // launch.
-  thread_local char *persistent_dev_arg_buf = nullptr;
-  thread_local std::size_t persistent_dev_arg_buf_cap = 0;
+  // Correctness preconditions enforced here / required from the caller:
+  //   * Single in-order stream: the cache assumes H2D N+1 cannot start
+  //     before kernel N completes, which holds on the default (nullptr)
+  //     stream used here. Callers issuing launches for THIS handle on a
+  //     non-default stream must externally synchronize before reusing the
+  //     handle on a different stream.
+  //   * HIP-graph capture: the skip-H2D path produces no captured node,
+  //     so a captured graph replayed later would observe stale dev_arg_buf
+  //     bytes. Disable the cache via QD_AMDGPU_DISABLE_LAUNCHER_ARG_CACHE=1
+  //     whenever the calling stream is in `hipStreamBeginCapture` mode.
+  //   * Per-handle serialization: the arg_buf_mu mutex protects the
+  //     cache-check / H2D / cache-update window so two host threads
+  //     launching the same handle concurrently don't race on dev_arg_buf.
+  //     Per-handle ownership eliminates the cross-handle clobber hazard
+  //     that the prior thread_local shared buffer would have exposed.
   if (ctx.arg_buffer_size > 0) {
-    if (ctx.arg_buffer_size > persistent_dev_arg_buf_cap) {
-      if (persistent_dev_arg_buf) {
-        AMDGPUDriver::get_instance().mem_free_async(persistent_dev_arg_buf,
+    std::lock_guard<std::mutex> arg_buf_lock(*launcher_ctx.arg_buf_mu);
+    if (ctx.arg_buffer_size > launcher_ctx.dev_arg_buf_cap) {
+      if (launcher_ctx.dev_arg_buf) {
+        AMDGPUDriver::get_instance().mem_free_async(launcher_ctx.dev_arg_buf,
                                                     nullptr);
       }
       // Round up to amortize future growth.
@@ -292,13 +325,23 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
         new_cap *= 2;
       }
       AMDGPUDriver::get_instance().malloc_async(
-          (void **)&persistent_dev_arg_buf, new_cap, nullptr);
-      persistent_dev_arg_buf_cap = new_cap;
+          (void **)&launcher_ctx.dev_arg_buf, new_cap, nullptr);
+      launcher_ctx.dev_arg_buf_cap = new_cap;
+      // Forces H2D below: cached size (if any) won't match new size.
+      launcher_ctx.last_host_arg_buf.clear();
     }
-    AMDGPUDriver::get_instance().memcpy_host_to_device_async(
-        persistent_dev_arg_buf, ctx.get_context().arg_buffer,
-        ctx.arg_buffer_size, nullptr);
-    ctx.get_context().arg_buffer = persistent_dev_arg_buf;
+    char *host = static_cast<char *>(ctx.get_context().arg_buffer);
+    bool skip_h2d =
+        !launcher_arg_cache_disabled() &&
+        (launcher_ctx.last_host_arg_buf.size() == ctx.arg_buffer_size) &&
+        (std::memcmp(launcher_ctx.last_host_arg_buf.data(), host,
+                     ctx.arg_buffer_size) == 0);
+    if (!skip_h2d) {
+      AMDGPUDriver::get_instance().memcpy_host_to_device_async(
+          launcher_ctx.dev_arg_buf, host, ctx.arg_buffer_size, nullptr);
+      launcher_ctx.last_host_arg_buf.assign(host, host + ctx.arg_buffer_size);
+    }
+    ctx.get_context().arg_buffer = launcher_ctx.dev_arg_buf;
   }
 
   if (ctx.graph_do_while_arg_id >= 0) {
