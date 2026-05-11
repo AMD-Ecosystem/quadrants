@@ -102,6 +102,29 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
       if (!F.hasFnAttribute("amdgpu-dx10-clamp")) {
         F.addFnAttr("amdgpu-dx10-clamp", "false");
       }
+      // Strip implicit kernel-arg SGPR preload pairs that the AMDGPU
+      // ABI provides by default but no Quadrants kernel consumes
+      // (no HSA queue ops, no hostcall, no multigrid sync, no
+      // device-side enqueue). Each preload removed frees an SGPR pair
+      // at kernel entry. Kernels at SGPR=112 today are 1 step above
+      // the 100-SGPR / 8-waves-per-CU occupancy boundary; reclaiming
+      // ~6-10 SGPRs lifts SGPR-bound kernels (e.g. func_broad_phase_k3
+      // at 1 wave/SIMD) onto the next occupancy step.
+      static constexpr const char *kAmdgpuNoImplicitArgs[] = {
+          "amdgpu-no-queue-ptr",
+          "amdgpu-no-dispatch-id",
+          "amdgpu-no-completion-action",
+          "amdgpu-no-multigrid-sync-arg",
+          "amdgpu-no-heap-ptr",
+          "amdgpu-no-default-queue",
+          "amdgpu-no-hostcall-ptr",
+          "amdgpu-no-lds-kernel-id",
+      };
+      for (const char *attr : kAmdgpuNoImplicitArgs) {
+        if (!F.hasFnAttribute(attr)) {
+          F.addFnAttr(attr);
+        }
+      }
     }
   }
 

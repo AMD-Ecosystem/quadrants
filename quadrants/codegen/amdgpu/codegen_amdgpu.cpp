@@ -251,10 +251,33 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     auto epilogue = create_xlogue(stmt->tls_epilogue);
 
     auto [begin, end] = get_range_for_bounds(stmt);
-    call("gpu_parallel_range_for_fixed_config",
-         {get_context(), begin, end, tlctx->get_constant(stmt->block_dim),
-          tlctx->get_constant(get_effective_range_grid_dim(stmt)), tls_prologue,
-          body, epilogue, tlctx->get_constant(stmt->tls_size)});
+    const int effective_grid_dim = get_effective_range_grid_dim(stmt);
+    // The no-loop runtime variant assumes block_dim * grid_dim >=
+    // end - begin so the grid covers the iteration space in one pass.
+    // const_begin && const_end alone is NOT sufficient: offload.cpp
+    // initializes grid_dim to config.saturating_grid_dim, and
+    // get_effective_range_grid_dim only takes min(saturating, exact),
+    // never max. Whenever num_threads > saturating_grid_dim *
+    // block_dim (e.g. test_parallel_range_for at 1M iters with
+    // block_dim=8, or runtime RNG state init at ~10M states), the
+    // grid is undersized and the looping entry must be used to
+    // process the rest of the range via the grid-stride loop.
+    const bool grid_covers_range =
+        stmt->const_begin && stmt->const_end &&
+        static_cast<int64_t>(effective_grid_dim) * stmt->block_dim >=
+            static_cast<int64_t>(stmt->end_value - stmt->begin_value);
+    if (grid_covers_range) {
+      call("gpu_parallel_range_for_fixed_config_no_loop",
+           {get_context(), begin, end, tlctx->get_constant(stmt->block_dim),
+            tls_prologue, body, epilogue,
+            tlctx->get_constant(stmt->tls_size)});
+    } else {
+      call("gpu_parallel_range_for_fixed_config",
+           {get_context(), begin, end, tlctx->get_constant(stmt->block_dim),
+            tlctx->get_constant(effective_grid_dim),
+            tls_prologue, body, epilogue,
+            tlctx->get_constant(stmt->tls_size)});
+    }
   }
 
   void create_offload_mesh_for(OffloadedStmt *stmt) override {

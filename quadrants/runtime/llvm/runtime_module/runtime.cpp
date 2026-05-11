@@ -1695,6 +1695,36 @@ __attribute__((always_inline)) void gpu_parallel_range_for_fixed_config(
   if (epilogue)
     epilogue(context, tls_ptr);
 }
+
+// Specialization for the const-bounds case, where the JIT sizes
+// fixed_grid_dim = ceil((end - begin) / fixed_block_dim) so the grid
+// covers the iteration space in exactly one pass per wave. The
+// grid-stride loop in gpu_parallel_range_for_fixed_config is then
+// dead, but LLVM keeps the loop bookkeeping (`stride`, `end`
+// comparison, backedge) which inflates SGPR pressure across every
+// kernel by ~2-4 SGPRs. Reaching the next 100-SGPR / 8-waves-per-CU
+// occupancy step on lightweight kernels (e.g. func_broad_phase_k3,
+// SGPR=112) hinges on shaving exactly that much.
+__attribute__((always_inline))
+void gpu_parallel_range_for_fixed_config_no_loop(
+    RuntimeContext *context,
+    int begin,
+    int end,
+    int fixed_block_dim,
+    range_for_xlogue prologue,
+    RangeForTaskFunc *func,
+    range_for_xlogue epilogue,
+    const std::size_t tls_size) {
+  int idx = thread_idx() + fixed_block_dim * block_idx() + begin;
+  alignas(8) char tls_buffer[64];
+  auto tls_ptr = &tls_buffer[0];
+  if (prologue)
+    prologue(context, tls_ptr);
+  if (idx < end)
+    func(context, tls_ptr, idx);
+  if (epilogue)
+    epilogue(context, tls_ptr);
+}
 #endif
 
 struct mesh_task_helper_context {
