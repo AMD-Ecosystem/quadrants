@@ -143,7 +143,7 @@ LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
     // magic number 32
     // I didn't find the relevant parameter to limit the max block num per CU
     // So ....
-    int query_max_block_per_cu{32};
+    int query_max_block_per_cu{8};
     if (config.max_block_dim == 0) {
       config.max_block_dim = query_max_block_dim;
     }

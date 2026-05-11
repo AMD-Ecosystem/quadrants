@@ -17,8 +17,8 @@
 namespace quadrants {
 namespace lang {
 #if defined(QD_WITH_AMDGPU)
-JITModule *JITSessionAMDGPU ::add_module(std::unique_ptr<llvm::Module> M,
-                                         int max_reg) {
+JITModule *JITSessionAMDGPU::add_module(std::unique_ptr<llvm::Module> M,
+                                        int max_reg) {
   // HSACo caching
   auto cache_key = compute_module_cache_key(M.get());
   auto cache_it = hsaco_cache_.find(cache_key);
