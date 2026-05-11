@@ -284,11 +284,10 @@ class LowerAST : public IRVisitor {
         // an inner-loop iteration on AMDGPU). The intermediate axes
         // still need the mod because their value is the full unwrapped
         // index modulo the per-axis stride.
-        Stmt *loop_var =
-            (i == 0)
-                ? loop_index
-                : new_statements.push_back<BinaryOpStmt>(
-                      BinaryOpType::mod, loop_index, shape[i]);
+        Stmt *loop_var = (i == 0)
+                             ? loop_index
+                             : new_statements.push_back<BinaryOpStmt>(
+                                   BinaryOpType::mod, loop_index, shape[i]);
         new_for->body->local_var_to_stmt[stmt->loop_var_ids[i]] = loop_var;
         std::vector<uint32_t> decoration = {
             uint32_t(DecorationStmt::Decoration::kLoopUnique), uint32_t(i)};

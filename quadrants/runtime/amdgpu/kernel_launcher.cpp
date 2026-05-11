@@ -280,14 +280,16 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   if (ctx.arg_buffer_size > 0) {
     if (ctx.arg_buffer_size > launcher_ctx.arg_buffer_capacity) {
       if (launcher_ctx.arg_buffer_dev_ptr != nullptr) {
-        AMDGPUDriver::get_instance().mem_free_async(launcher_ctx.arg_buffer_dev_ptr, nullptr);
+        AMDGPUDriver::get_instance().mem_free_async(
+            launcher_ctx.arg_buffer_dev_ptr, nullptr);
       }
       // Round up to amortize future growth.
       std::size_t new_cap = std::max<std::size_t>(ctx.arg_buffer_size, 256);
       while (new_cap < ctx.arg_buffer_size) {
         new_cap *= 2;
       }
-      AMDGPUDriver::get_instance().malloc_async(&launcher_ctx.arg_buffer_dev_ptr, new_cap, nullptr);
+      AMDGPUDriver::get_instance().malloc_async(
+          &launcher_ctx.arg_buffer_dev_ptr, new_cap, nullptr);
       launcher_ctx.arg_buffer_capacity = new_cap;
       // Cache invalidation: the new device buffer is uninitialised, so any
       // prior cached_hash that matched the freed buffer's contents no
@@ -305,7 +307,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       // FNV-1a 64-bit. ~1 cycle/byte on host vs ~7.8 us PCIe round-trip per
       // copyBuffer in rocprof, so even kilobyte-scale bodies are net-positive
       // when the cache hits.
-      const uint8_t *host_buf = reinterpret_cast<const uint8_t *>(ctx.get_context().arg_buffer);
+      const uint8_t *host_buf =
+          reinterpret_cast<const uint8_t *>(ctx.get_context().arg_buffer);
       uint64_t h = 0xcbf29ce484222325ULL;
       for (std::size_t i = 0; i < ctx.arg_buffer_size; ++i) {
         h = (h ^ host_buf[i]) * 0x100000001b3ULL;
@@ -319,8 +322,9 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       }
     }
     if (need_h2d) {
-      AMDGPUDriver::get_instance().memcpy_host_to_device_async(device_arg_buffer, ctx.get_context().arg_buffer,
-                                                               ctx.arg_buffer_size, nullptr);
+      AMDGPUDriver::get_instance().memcpy_host_to_device_async(
+          device_arg_buffer, ctx.get_context().arg_buffer, ctx.arg_buffer_size,
+          nullptr);
     }
     ctx.get_context().arg_buffer = device_arg_buffer;
   }

@@ -191,8 +191,8 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
         // bounded (agent), and the operand isn't fine-grained / remote.
         // Without these gates we got a global_atomic_cmpswap retry
         // loop, the same pattern that made i32 atomic_or 30x slow.
-        return create_native_amdgpu_integer_atomic(
-            llvm::AtomicRMWInst::FAdd, dest, val);
+        return create_native_amdgpu_integer_atomic(llvm::AtomicRMWInst::FAdd,
+                                                   dest, val);
       } else if (op == AtomicOpType::min) {
         return atomic_op_using_cas(
             dest, val,
@@ -223,11 +223,9 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       llvm::AtomicRMWInst::BinOp op,
       llvm::Value *dest,
       llvm::Value *val) {
-    auto *atomic = builder->CreateAtomicRMW(
-        op, dest, val, llvm::MaybeAlign(0),
-        llvm::AtomicOrdering::Monotonic);
-    atomic->setSyncScopeID(
-        llvm_context->getOrInsertSyncScopeID("agent"));
+    auto *atomic = builder->CreateAtomicRMW(op, dest, val, llvm::MaybeAlign(0),
+                                            llvm::AtomicOrdering::Monotonic);
+    atomic->setSyncScopeID(llvm_context->getOrInsertSyncScopeID("agent"));
     // gfx940+ gates native f32 atomic_add on absence of fine-grained
     // and remote (xgmi peer) memory; mark the instruction so the
     // backend selects the native instruction. Harmless on integer ops.
@@ -293,12 +291,10 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       // use, and the base-class CAS lowering is correct for f16.
       return TaskCodeGenLLVM::real_type_atomic(stmt);
     }
-    if (op == AtomicOpType::add &&
-        (prim_type == PrimitiveTypeID::f32 ||
-         prim_type == PrimitiveTypeID::f64)) {
+    if (op == AtomicOpType::add && (prim_type == PrimitiveTypeID::f32 ||
+                                    prim_type == PrimitiveTypeID::f64)) {
       return create_native_amdgpu_integer_atomic(
-          llvm::AtomicRMWInst::FAdd, llvm_val[stmt->dest],
-          llvm_val[stmt->val]);
+          llvm::AtomicRMWInst::FAdd, llvm_val[stmt->dest], llvm_val[stmt->val]);
     }
     // f32/f64 min/max/mul stay on the base-class CAS path.
     return TaskCodeGenLLVM::real_type_atomic(stmt);
