@@ -1284,6 +1284,37 @@ int32 block_barrier_count_i32(int32 predicate) {
   return 0;
 }
 
+// Wave-scope subgroup primitives. These bodies are placeholder stubs
+// (return 0 / no-op) for LLVM-runtime backends that don't wire up a real
+// implementation. AMDGPU rewrites them at LLVM-IR codegen time via
+// patch_intrinsic in quadrants/runtime/llvm/llvm_context.cpp:
+//   - subgroupOr_i32 / subgroupAnd_i32 → amdgcn.icmp + amdgcn.ballot
+//     (single-instruction-equivalent at AMDGCN level after lowering)
+//   - subgroupBarrier → llvm.amdgcn.wave.barrier (discardable barrier;
+//     compiler + memory-ordering only, emits no hardware instruction)
+//
+// CUDA / CPU LLVM-runtime backends currently fall through to the stubs
+// below and get backend-limited behaviour (return 0 / no sync). Wiring
+// them up for those backends is left for follow-up PRs. Vulkan / Metal
+// users should keep using the existing polymorphic subgroupOr /
+// subgroupAnd in subgroup.py.
+//
+// Semantics (v1, boolean-only): subgroupOr_i32(val) returns 1 if any
+// active lane in the wave has val != 0, else 0. subgroupAnd_i32 is the
+// dual. Generalising to bitwise OR/AND of arbitrary i32 values would
+// need DPP-based tree reduction; the boolean case is sufficient for
+// wave-vote convergence checks.
+int32 subgroupOr_i32(int32 val) {
+  return 0;
+}
+
+int32 subgroupAnd_i32(int32 val) {
+  return 0;
+}
+
+void subgroupBarrier() {
+}
+
 void warp_barrier(uint32 mask) {
 }
 

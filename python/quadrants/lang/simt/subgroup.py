@@ -1,9 +1,38 @@
 # type: ignore
+"""Wave-scope (a.k.a. SPIR-V "Subgroup") primitives.
+
+Backend availability for the wave-scope reductions added in this module:
+
+- AMDGPU: full implementation via ``patch_intrinsic`` (see
+  ``quadrants/runtime/llvm/llvm_context.cpp``); ``reduce_or_i32`` /
+  ``reduce_and_i32`` lower to ``amdgcn.icmp`` + ``amdgcn.ballot``
+  (single-instruction-equivalent at AMDGCN level), and ``barrier`` lowers
+  to ``llvm.amdgcn.wave.barrier`` (compiler + memory-ordering barrier
+  scoped to the current wave; no hardware sync, no deadlock hazard on
+  partial-wave participation).
+- Other LLVM-runtime backends (CPU, CUDA today): no patcher yet —
+  ``reduce_or_i32`` / ``reduce_and_i32`` fall through to the runtime stubs
+  in ``quadrants/runtime/llvm/runtime_module/runtime.cpp`` which return 0.
+  This is intentional placeholder behaviour for backends where wave-scope
+  semantics aren't wired up; callers that need cross-backend portability
+  should gate on ``qd.cfg.arch == qd.amdgpu`` for now.
+- SPIR-V backends (Vulkan, Metal): the polymorphic ``reduce_or`` /
+  ``reduce_and`` (no ``_i32`` suffix) cover those targets.
+"""
 
 from quadrants.lang import impl
 
 
 def barrier():
+    """Wave-scope (subgroup) execution + memory-ordering barrier.
+
+    On AMDGPU lowers to ``llvm.amdgcn.wave.barrier``: no hardware wait
+    (all 64 lanes of an AMDGPU wave already execute in lockstep) but
+    prevents the compiler from reordering memory ops or moving
+    convergent ops across this point. Safe to call from non-uniform
+    control flow — does NOT synchronize across waves in a workgroup.
+    For workgroup-scope synchronization use ``qd.simt.block.sync()``.
+    """
     return impl.call_internal("subgroupBarrier", with_runtime_context=False)
 
 
@@ -23,6 +52,28 @@ def all_true(cond):
 def any_true(cond):
     # TODO
     pass
+
+
+def reduce_or_i32(value):
+    """Wave-scope OR reduction (boolean): returns 1 if any active lane
+    in the wave has value != 0, else 0.
+
+    AMDGPU implementation: ``s_or_b64``-equivalent via ``amdgcn.icmp.i32``
+    ballot, single-instruction at the AMDGCN level after LLVM lowering.
+    See ``quadrants/runtime/llvm/llvm_context.cpp`` for the patcher.
+
+    Differs from the polymorphic ``reduce_or(value)`` (SPIRV-only at the
+    moment): this variant is i32-typed and treats input as boolean
+    (0 vs non-zero), sufficient for wave-vote convergence checks.
+    """
+    return impl.call_internal("subgroupOr_i32", value, with_runtime_context=False)
+
+
+def reduce_and_i32(value):
+    """Wave-scope AND reduction (boolean): returns 1 if all active lanes
+    in the wave have value != 0, else 0. See ``reduce_or_i32`` for context.
+    """
+    return impl.call_internal("subgroupAnd_i32", value, with_runtime_context=False)
 
 
 def all_equal(value):
@@ -168,7 +219,9 @@ __all__ = [
     "reduce_min",
     "reduce_max",
     "reduce_and",
+    "reduce_and_i32",
     "reduce_or",
+    "reduce_or_i32",
     "reduce_xor",
     "inclusive_add",
     "inclusive_mul",

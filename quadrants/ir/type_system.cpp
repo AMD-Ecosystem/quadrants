@@ -339,6 +339,12 @@ void Operations::init_internals() {
   PLAIN_OP(block_barrier_or_i32, i32, false, i32);
   PLAIN_OP(block_barrier_count_i32, i32, false, i32);
   PLAIN_OP(grid_memfence, i32_void, false);
+
+  // Wave-scope OR/AND boolean reductions. AMDGPU-implemented (see
+  // llvm_context.cpp); no-op stubs on other LLVM archs.
+  PLAIN_OP(subgroupOr_i32, i32, false, i32);
+  PLAIN_OP(subgroupAnd_i32, i32, false, i32);
+
   CUDA_VOTE_SYNC(all);
   CUDA_VOTE_SYNC(any);
   CUDA_VOTE_SYNC(uni);
