@@ -294,8 +294,9 @@ std::string fingerprint_value(Stmt *s,
          gl->src->is<MatrixPtrStmt>())) {
       out_is_indirect = true;
     }
-    return "R(" + fingerprint_value(gl->src, depth + 1, out_has_loop_idx,
-                                    out_is_indirect, inside_index, load_map) +
+    return "R(" +
+           fingerprint_value(gl->src, depth + 1, out_has_loop_idx,
+                             out_is_indirect, inside_index, load_map) +
            ")";
   }
   if (auto *ep = s->cast<ExternalPtrStmt>()) {
@@ -348,8 +349,8 @@ std::string fingerprint_value(Stmt *s,
     std::string rhs_fp =
         fingerprint_value(bin->rhs, depth + 1, out_has_loop_idx,
                           out_is_indirect, inside_index, load_map);
-    return "B" + std::to_string(static_cast<int>(bin->op_type)) + "(" +
-           lhs_fp + "," + rhs_fp + ")";
+    return "B" + std::to_string(static_cast<int>(bin->op_type)) + "(" + lhs_fp +
+           "," + rhs_fp + ")";
   }
   if (auto *un = s->cast<UnaryOpStmt>()) {
     std::string o_fp =
@@ -574,7 +575,8 @@ class CollectGlobalAccesses : public BasicStmtVisitor {
   }
 
   void record(Stmt *ptr, bool is_write, bool is_read) {
-    if (ptr && (ptr->is<ThreadLocalPtrStmt>() || ptr->is<BlockLocalPtrStmt>())) {
+    if (ptr &&
+        (ptr->is<ThreadLocalPtrStmt>() || ptr->is<BlockLocalPtrStmt>())) {
       return;
     }
     auto r = extract_resource(ptr);
@@ -787,11 +789,9 @@ FuseReject can_fuse_with_reason(OffloadedStmt *a, OffloadedStmt *b) {
   using Type = OffloadedStmt::TaskType;
   if (a->task_type != Type::range_for || b->task_type != Type::range_for)
     return FuseReject::NotRangeFor;
-  if (a->tls_prologue || a->tls_epilogue || b->tls_prologue ||
-      b->tls_epilogue)
+  if (a->tls_prologue || a->tls_epilogue || b->tls_prologue || b->tls_epilogue)
     return FuseReject::TlsBls;
-  if (a->bls_prologue || a->bls_epilogue || b->bls_prologue ||
-      b->bls_epilogue)
+  if (a->bls_prologue || a->bls_epilogue || b->bls_prologue || b->bls_epilogue)
     return FuseReject::TlsBls;
   if (!a->mem_access_opt.get_all().empty() ||
       !b->mem_access_opt.get_all().empty())
@@ -898,15 +898,15 @@ FuseReject can_fuse_with_reason(OffloadedStmt *a, OffloadedStmt *b) {
     // resource across both bodies. Safe iff there is exactly one,
     // and it is per-thread.
     std::unordered_set<AccessFp, AccessFpHash> all_fps;
-    auto add_fps = [&](
-        const std::unordered_map<Resource, CollectGlobalAccesses::FpSet,
-                                 ResourceHash> &m) {
-      auto it = m.find(r);
-      if (it == m.end())
-        return;
-      for (const auto &fp : it->second)
-        all_fps.insert(fp);
-    };
+    auto add_fps =
+        [&](const std::unordered_map<Resource, CollectGlobalAccesses::FpSet,
+                                     ResourceHash> &m) {
+          auto it = m.find(r);
+          if (it == m.end())
+            return;
+          for (const auto &fp : it->second)
+            all_fps.insert(fp);
+        };
     add_fps(a_acc.writes);
     add_fps(a_acc.reads);
     add_fps(b_acc.writes);
@@ -941,7 +941,6 @@ void merge_b_into_a(OffloadedStmt *a, OffloadedStmt *b) {
   b->body->statements.clear();
 }
 
-
 int fuse_pass(Block *root_block) {
   int fused_count = 0;
   bool changed = true;
@@ -950,20 +949,20 @@ int fuse_pass(Block *root_block) {
   while (changed) {
     changed = false;
     auto &stmts = root_block->statements;
-    for (size_t i = 0; i + 1 < stmts.size(); ) {
+    for (size_t i = 0; i + 1 < stmts.size();) {
       auto *a = stmts[i]->cast<OffloadedStmt>();
       auto *b = stmts[i + 1]->cast<OffloadedStmt>();
       FuseReject reason =
           (a && b) ? can_fuse_with_reason(a, b) : FuseReject::NotRangeFor;
       if (reason == FuseReject::Ok) {
         if (diag_enabled()) {
-          fmt::print(stderr,
+          fmt::print(
+              stderr,
               "[fuse_offloaded_tasks] fusing offloads at indices {} and {} "
               "(begin={}, end={}, block_dim={}, const_begin={}, "
               "const_end={}, begin_offset={}, end_offset={})\n",
               i, i + 1, a->begin_value, a->end_value, a->block_dim,
-              a->const_begin, a->const_end, a->begin_offset,
-              a->end_offset);
+              a->const_begin, a->const_end, a->begin_offset, a->end_offset);
         }
         merge_b_into_a(a, b);
         stmts.erase(stmts.begin() + (long)i + 1);
@@ -1028,9 +1027,9 @@ void fuse_offloaded_tasks(IRNode *root) {
   int n = fuse_pass(root_block);
   if (diag_enabled()) {
     fmt::print(stderr,
-        "[fuse_offloaded_tasks] kernel: {} top-level offloads, {} "
-        "range_for, fused {} pair(s) (raw={})\n",
-        n_offloads, n_range_for, n, raw_enabled() ? "on" : "off");
+               "[fuse_offloaded_tasks] kernel: {} top-level offloads, {} "
+               "range_for, fused {} pair(s) (raw={})\n",
+               n_offloads, n_range_for, n, raw_enabled() ? "on" : "off");
   }
 }
 
