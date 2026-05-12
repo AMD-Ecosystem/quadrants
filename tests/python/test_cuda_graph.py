@@ -215,7 +215,10 @@ def test_no_cuda_graph_annotation(tensor_type):
     y = tensor_type(qd.f32, (n,))
 
     two_loops(x, y)
-    assert _num_offloaded_tasks() >= 2
+    # Without cuda_graph=True the JIT may fuse adjacent disjoint
+    # range_for tasks, so the exact task count is not part of this
+    # test's contract. The cuda_graph-related assertions below are.
+    assert _num_offloaded_tasks() >= 1
     assert _cuda_graph_num_nodes() == 0
     assert not _cuda_graph_used()
     two_loops(x, y)

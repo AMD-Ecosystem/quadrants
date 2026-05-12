@@ -409,6 +409,7 @@ class Kernel(FuncBase):
                 )
                 if self.fn_attrs:
                     quadrants_kernel.set_fn_attrs(self.fn_attrs)
+                quadrants_kernel.use_cuda_graph = self.use_cuda_graph
                 if _pass == 1:
                     assert key not in self.materialized_kernels
                     self.materialized_kernels[key] = quadrants_kernel

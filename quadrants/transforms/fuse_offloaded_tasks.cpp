@@ -61,6 +61,7 @@
 #include "quadrants/ir/transforms.h"
 #include "quadrants/ir/visitors.h"
 #include "quadrants/program/compile_config.h"
+#include "quadrants/program/kernel.h"
 #include "quadrants/system/profiler.h"
 
 #include <cctype>
@@ -996,6 +997,20 @@ void fuse_offloaded_tasks(IRNode *root) {
   auto *root_block = root->cast<Block>();
   if (!root_block)
     return;
+  // Opt out of fusion entirely when the user explicitly asked for the
+  // cuda_graph dispatch model. The cuda_graph manager relies on each
+  // top-level for-loop producing its own OffloadedStmt so it can
+  // capture them as graph nodes; collapsing them here would silently
+  // change the dispatch shape the user requested. The flag is
+  // mirrored from Python onto Kernel::use_cuda_graph at materialize
+  // time, so we just inspect the first offload's owning kernel.
+  for (auto &s : root_block->statements) {
+    if (auto *o = s->cast<OffloadedStmt>()) {
+      if (o->kernel_ && o->kernel_->use_cuda_graph)
+        return;
+      break;
+    }
+  }
   // Diagnostic: print how many top-level offloads this kernel has and
   // how many adjacent (A,B) pairs we considered, so we can tell
   // whether (a) we even saw candidates and (b) which fusion check

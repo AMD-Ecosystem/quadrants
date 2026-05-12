@@ -663,6 +663,7 @@ void export_lang(py::module &m) {
              }
              self->fn_attrs = fn_attrs;
            })
+      .def_readwrite("use_cuda_graph", &Kernel::use_cuda_graph)
       .def("insert_scalar_param", &Kernel::insert_scalar_param)
       .def("insert_arr_param", &Kernel::insert_arr_param)
       .def("insert_ndarray_param", &Kernel::insert_ndarray_param)
