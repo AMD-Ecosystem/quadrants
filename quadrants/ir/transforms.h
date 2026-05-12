@@ -117,6 +117,12 @@ bool determine_ad_stack_size(IRNode *root, const CompileConfig &config);
 bool constant_fold(IRNode *root);
 void associate_continue_scope(IRNode *root, const CompileConfig &config);
 void offload(IRNode *root, const CompileConfig &config);
+// Conservative JIT-level kernel fusion: merges adjacent OffloadedStmt
+// range_for tasks that have identical launch bounds and provably
+// disjoint global access sets. Gated by the QD_FUSE_TASKS env var so
+// the default code path is unchanged. See
+// quadrants/transforms/fuse_offloaded_tasks.cpp for the safety model.
+void fuse_offloaded_tasks(IRNode *root);
 bool transform_statements(
     IRNode *root,
     std::function<bool(Stmt *)> filter,
