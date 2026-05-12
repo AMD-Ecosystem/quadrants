@@ -53,8 +53,10 @@
 // value) on every dynamic offload and incorrectly fuse unrelated
 // tasks, producing GPU memory faults.
 //
-// Gated behind the QD_FUSE_TASKS env var (off by default) so it can be
-// A/B tested cleanly against the existing baseline.
+// Enabled by default. Set QD_FUSE_TASKS=0 (or off/false/no) to bypass
+// the pass entirely. Set QD_FUSE_TASKS_RAW=0 to keep fusion on but
+// disable the same-thread RAW relaxation, falling back to the
+// disjoint-resources policy only.
 
 #include "quadrants/ir/ir.h"
 #include "quadrants/ir/statements.h"
@@ -636,16 +638,15 @@ class CollectGlobalAccesses : public BasicStmtVisitor {
   }
 };
 
-// Coarse compile-config knob: returns true iff the user has explicitly
-// opted in via QD_FUSE_TASKS=1 (or =on/=true). The pass is a behavioral
-// change that needs validation per workload before being made default.
+// Coarse compile-config knob: enabled by default. Set QD_FUSE_TASKS=0
+// (or off/false/no) to bypass the pass entirely; this is the kill
+// switch if a workload exposes a fusion-related issue we haven't
+// already covered by the safety analysis.
 bool fuse_enabled() {
   static const bool enabled = []() {
     const char *flag = std::getenv("QD_FUSE_TASKS");
     if (!flag || flag[0] == '\0')
-      return false;
-    // Accept "1", "on", "true", "yes" (case-insensitive); reject "0",
-    // "off", "false", "no".
+      return true;
     std::string s(flag);
     for (auto &c : s)
       c = (char)std::tolower((unsigned char)c);
