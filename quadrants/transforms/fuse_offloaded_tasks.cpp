@@ -19,6 +19,18 @@
 //      their bound from the same global temporary slot)
 //   3. *disjoint* global access resources (ndarrays / SNodes / gtmp)
 //
+// Bubble-pass (skip-over reordering). When two fusable range_for
+// offloads A and C are separated by exactly one non-fusable offload
+// S, we try to reorder S out of the way so A and C become adjacent.
+// S is movable iff its read/write sets commute with the side it
+// crosses (A if we move S before A; C if we move S after C), and S
+// is itself a "well-behaved" task (range_for or serial, no
+// tls/bls prologue, no ClearList / Rand / unknown side effect, no
+// dynamic bound the other side might write). This unblocks the
+// Genesis "step_1 / step_2" pattern where a small serial/listgen
+// task is sandwiched between data-independent parallel loops and
+// would otherwise force two kernel dispatches.
+//
 // Condition (3) is a sufficient (not necessary) safety check. Pre-fusion,
 // the kernel boundary acts as a global barrier - thread T1 in task A
 // finishes before any thread starts task B. Post-fusion, every thread
@@ -55,8 +67,9 @@
 //
 // Enabled by default. Set QD_FUSE_TASKS=0 (or off/false/no) to bypass
 // the pass entirely. Set QD_FUSE_TASKS_RAW=0 to keep fusion on but
-// disable the same-thread RAW relaxation, falling back to the
-// disjoint-resources policy only.
+// disable the same-thread RAW relaxation. Set QD_FUSE_TASKS_BUBBLE=0
+// to keep fusion on but disable the skip-over reordering, falling
+// back to adjacent-only fusion.
 
 #include "quadrants/ir/ir.h"
 #include "quadrants/ir/statements.h"
@@ -941,11 +954,136 @@ void merge_b_into_a(OffloadedStmt *a, OffloadedStmt *b) {
   b->body->statements.clear();
 }
 
+// Returns true iff swapping the execution order of `x` and `y` in
+// the kernel's root block is observationally equivalent. This is
+// the safety predicate used by the bubble-pass to move a non-fusable
+// OffloadedStmt out of the way and unblock fusion of its
+// neighbours.
+//
+// Two offloads commute iff:
+//   (a) Both are "well-behaved" task types (range_for or serial)
+//       with no tls/bls prologue and no opaque side effect
+//       (ClearList, Rand, SNodeOp, foreign call, assert).
+//   (b) Their dynamic bounds (if any) are independent of the other
+//       side - neither offload writes the gtmp slot the other
+//       reads its launch bound from. Reordering across a write to
+//       the bound slot changes the iteration count of the reader,
+//       which is not observationally equivalent.
+//   (c) For every shared global resource (ndarray / snode / gtmp),
+//       at most one side touches it AND it is read-only. Any
+//       shared resource with a writer on either side forms a
+//       race-equivalent dependency that we cannot prove safe to
+//       reorder.
+bool offloads_commute(OffloadedStmt *x, OffloadedStmt *y) {
+  using Type = OffloadedStmt::TaskType;
+  auto ok_type = [](Type t) {
+    return t == Type::range_for || t == Type::serial;
+  };
+  if (!ok_type(x->task_type) || !ok_type(y->task_type))
+    return false;
+  if (x->tls_prologue || x->tls_epilogue || x->bls_prologue || x->bls_epilogue)
+    return false;
+  if (y->tls_prologue || y->tls_epilogue || y->bls_prologue || y->bls_epilogue)
+    return false;
+
+  // Build resolved-load maps + access sets for both bodies.
+  LocalLoadResolver x_loads, y_loads;
+  x->body->accept(&x_loads);
+  y->body->accept(&y_loads);
+  CollectGlobalAccesses x_acc, y_acc;
+  x_acc.load_map = &x_loads.resolved;
+  y_acc.load_map = &y_loads.resolved;
+  x->body->accept(&x_acc);
+  y->body->accept(&y_acc);
+  if (x_acc.has_unknown || y_acc.has_unknown)
+    return false;
+
+  // Dynamic-bound independence. If x reads its loop bound from a
+  // gtmp slot, y must not write that slot (and vice versa). Mirror
+  // of the can_fuse_with_reason dynamic-bound check.
+  auto bound_indep = [](OffloadedStmt *o,
+                        const CollectGlobalAccesses &other) -> bool {
+    auto check_slot = [&](int64_t off) {
+      Resource r;
+      r.kind = Resource::Kind::GlobalTmp;
+      r.ndarray_arg_id = -1;
+      r.ndarray_is_grad = 0;
+      r.snode = nullptr;
+      r.gtmp_offset = off;
+      return other.writes.count(r) == 0;
+    };
+    if (!o->const_end && o->end_stmt == nullptr) {
+      if (!check_slot(static_cast<int64_t>(o->end_offset)))
+        return false;
+      if (!o->const_begin && !check_slot(static_cast<int64_t>(o->begin_offset)))
+        return false;
+    }
+    return true;
+  };
+  if (!bound_indep(x, y_acc))
+    return false;
+  if (!bound_indep(y, x_acc))
+    return false;
+
+  // Shared-resource check. Any shared resource with a writer on
+  // either side blocks the swap. We deliberately do *not* run the
+  // same-thread RAW relaxation here: that admission relies on A
+  // and B having matched launch dimensions (so thread T in A and
+  // thread T in B touch the same byte). The bubble pass operates
+  // on offloads whose launch dimensions don't match the side they
+  // cross, so the per-thread address fingerprints don't compose
+  // and the relaxation isn't sound.
+  std::unordered_set<Resource, ResourceHash> all_resources;
+  for (const auto &kv : x_acc.writes)
+    all_resources.insert(kv.first);
+  for (const auto &kv : x_acc.reads)
+    all_resources.insert(kv.first);
+  for (const auto &kv : y_acc.writes)
+    all_resources.insert(kv.first);
+  for (const auto &kv : y_acc.reads)
+    all_resources.insert(kv.first);
+  for (const auto &r : all_resources) {
+    const bool x_w = x_acc.writes.count(r) > 0;
+    const bool x_r = x_acc.reads.count(r) > 0;
+    const bool y_w = y_acc.writes.count(r) > 0;
+    const bool y_r = y_acc.reads.count(r) > 0;
+    if (!(x_w || x_r))
+      continue;  // only y touches r
+    if (!(y_w || y_r))
+      continue;  // only x touches r
+    if (!x_w && !y_w)
+      continue;  // both read-only
+    return false;
+  }
+  return true;
+}
+
+// Bubble pass knob. Defaults on. Set QD_FUSE_TASKS_BUBBLE=0 to
+// disable just the skip-over reordering and keep plain adjacent
+// fusion enabled.
+bool bubble_enabled() {
+  static const bool enabled = []() {
+    const char *flag = std::getenv("QD_FUSE_TASKS_BUBBLE");
+    if (!flag || flag[0] == '\0')
+      return true;
+    std::string s = flag;
+    for (auto &c : s)
+      c = (char)std::tolower((unsigned char)c);
+    if (s == "0" || s == "off" || s == "false" || s == "no")
+      return false;
+    return true;
+  }();
+  return enabled;
+}
+
 int fuse_pass(Block *root_block) {
   int fused_count = 0;
+  int bubble_before_count = 0;
+  int bubble_after_count = 0;
   bool changed = true;
   // Track per-reason reject counts for the diagnostic dump.
   std::unordered_map<int, int> reject_counts;
+  const bool bubble = bubble_enabled();
   while (changed) {
     changed = false;
     auto &stmts = root_block->statements;
@@ -969,10 +1107,60 @@ int fuse_pass(Block *root_block) {
         fused_count++;
         changed = true;
         // Don't advance i: try fusing the new neighbor.
-      } else {
-        reject_counts[(int)reason]++;
-        i++;
+        continue;
       }
+
+      // Bubble pass. If (a,b) can't fuse but (a, stmts[i+2]) could,
+      // and stmts[i+1] commutes with one side, reorder to put a
+      // and stmts[i+2] adjacent and then fuse them.
+      //
+      // We only consider the k=1 case (exactly one offload between
+      // the two fusable ones). Multi-step bubbling is handled by
+      // the outer while-changed loop: once one bubble succeeds we
+      // restart the scan and may find further opportunities.
+      if (bubble && a && b && i + 2 < stmts.size()) {
+        auto *c = stmts[i + 2]->cast<OffloadedStmt>();
+        if (c && can_fuse_with_reason(a, c) == FuseReject::Ok) {
+          if (offloads_commute(b, c)) {
+            // [a, b, c] -> [a, c, b]; then fuse (a, c) at i, i+1.
+            std::swap(stmts[i + 1], stmts[i + 2]);
+            if (diag_enabled()) {
+              fmt::print(stderr,
+                         "[fuse_offloaded_tasks] bubble: moved offload {} "
+                         "past offload {} to fuse {}+{}\n",
+                         i + 1, i + 2, i, i + 2);
+            }
+            merge_b_into_a(a, c);
+            stmts.erase(stmts.begin() + (long)i + 1);
+            fused_count++;
+            bubble_after_count++;
+            changed = true;
+            continue;
+          }
+          if (offloads_commute(a, b)) {
+            // [a, b, c] -> [b, a, c]; then fuse (a, c) at i+1, i+2.
+            std::swap(stmts[i], stmts[i + 1]);
+            if (diag_enabled()) {
+              fmt::print(stderr,
+                         "[fuse_offloaded_tasks] bubble: moved offload {} "
+                         "before offload {} to fuse {}+{}\n",
+                         i + 1, i, i, i + 2);
+            }
+            merge_b_into_a(a, c);
+            stmts.erase(stmts.begin() + (long)i + 2);
+            fused_count++;
+            bubble_before_count++;
+            changed = true;
+            // Position i now holds the moved-before offload (a
+            // non-fuse-candidate); skip past it.
+            i++;
+            continue;
+          }
+        }
+      }
+
+      reject_counts[(int)reason]++;
+      i++;
     }
   }
   if (diag_enabled() && !reject_counts.empty()) {
@@ -982,6 +1170,11 @@ int fuse_pass(Block *root_block) {
                  kv.second);
     }
     fmt::print(stderr, "\n");
+  }
+  if (diag_enabled() && (bubble_before_count || bubble_after_count)) {
+    fmt::print(stderr,
+               "[fuse_offloaded_tasks] bubble fusions: before={} after={}\n",
+               bubble_before_count, bubble_after_count);
   }
   return fused_count;
 }
