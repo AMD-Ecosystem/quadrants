@@ -36,15 +36,36 @@
 // Same-thread RAW relaxation (QD_FUSE_TASKS_RAW=1). When two adjacent
 // offloads share a resource we additionally check whether *every*
 // access to that resource (in either body) uses the same per-thread
-// address fingerprint. If the address is a function of the loop
-// index (and loop-invariant values like args / read-only gtmp slots),
-// thread T touches the same byte in both A and B and no other thread
-// touches that byte - the cross-kernel-boundary RAW becomes an
-// in-thread RAW, which is naturally ordered by program order. We
-// fingerprint the address Stmt with LoopIndexStmt canonicalised across
-// offloads (so A's and B's loop indices fingerprint identically) and
-// fall back to pointer identity for Stmt kinds we can't reason about
-// (which conservatively forces a mismatch).
+// address fingerprint AND that address is a *provably injective*
+// function of the loop index. Injectivity here means the mapping
+// `i -> address(i)` is one-to-one, so thread T touches a byte that
+// no other thread touches in either body - the cross-kernel-boundary
+// RAW becomes an in-thread RAW which is naturally ordered by program
+// order.
+//
+// Pure "depends on the loop index" is *not* sufficient. Non-injective
+// patterns like `arr[i // 2]`, `arr[i % 2]`, `arr[min(i, K)]`, or
+// `arr[i & 1]` all syntactically contain a loop index but collapse
+// multiple threads onto the same byte. Pre-fusion the kernel boundary
+// serialises the resulting cross-thread race; post-fusion it does not,
+// so the observable result can change even though the user code was
+// already racy.
+//
+// We therefore classify each sub-expression in the address as one of:
+//   - constant (Const / Arg / kernel-launch-invariant gtmp / ATB)
+//   - provably injective in the loop index (LoopIndexStmt, addition or
+//     subtraction with a compile-time constant, multiplication by a
+//     non-zero compile-time constant, shift-left by a compile-time
+//     constant, XOR with a compile-time constant, negation, bit_not,
+//     bitcast - all bijections on the integer lane)
+//   - non-injective / unclassified (everything else, including div,
+//     mod, max, min, bit_and, bit_or, shift-right, casts, math ops)
+// An indexed access (ExternalPtr / GlobalPtr / MatrixPtr) is injective
+// iff at least one of its index expressions is independently injective.
+// LoopIndexStmts are canonicalised across offloads (so A's and B's loop
+// indices fingerprint identically). Unhandled Stmt kinds fall back to
+// pointer identity, which mismatches across A and B and forces a safe
+// rejection.
 //
 // Sequencing. The pass *must* run after FixCrossOffloadReferences in
 // irpass::offload() so that OffloadedStmt::begin_offset / end_offset
@@ -136,10 +157,34 @@ struct ResourceHash {
   }
 };
 
+// True iff `s` is a compile-time ConstStmt.
+inline bool is_compile_time_const(Stmt *s) {
+  return s != nullptr && s->is<ConstStmt>();
+}
+
+// True iff `s` is a compile-time ConstStmt whose numeric value is non-zero.
+// Used by the injectivity classifier: multiplying or shift-left'ing an
+// injective expression by a *non-zero* compile-time constant preserves
+// injectivity; multiplying by zero collapses every thread onto address 0.
+// equal_value(static_cast<int64_t>(0)) constructs a TypedConstant of the
+// ConstStmt's own dtype with value 0 and compares - handles all integer
+// and float primitive types correctly.
+inline bool is_nonzero_compile_time_const(Stmt *s) {
+  auto *c = s ? s->cast<ConstStmt>() : nullptr;
+  if (!c)
+    return false;
+  return !c->val.equal_value(static_cast<int64_t>(0));
+}
+
 // Per-thread address fingerprint for an access.
-//   has_loop_idx : the fingerprinted expression depends on a
-//                  LoopIndexStmt; different threads produce different
-//                  addresses.
+//   is_injective_in_loop_idx : the fingerprinted expression is a provably
+//                  injective function of the loop index - the mapping
+//                  i -> address(i) is one-to-one, so different threads
+//                  necessarily touch different bytes. This is strictly
+//                  stronger than "address syntactically depends on the
+//                  loop index": `arr[i // 2]` depends on `i` but is not
+//                  injective in it. The same-thread RAW relaxation
+//                  requires injectivity, not just dependence.
 //   is_indirect  : the address dereferences another global pointer
 //                  (loads from an ndarray / snode) as part of its
 //                  index computation, e.g. `arr[other_arr[i], j]`.
@@ -151,18 +196,18 @@ struct ResourceHash {
 //                  rule out a cross-thread RAW.
 struct AccessFp {
   std::string fp;
-  bool has_loop_idx;
+  bool is_injective_in_loop_idx;
   bool is_indirect;
   bool operator==(const AccessFp &o) const {
-    return has_loop_idx == o.has_loop_idx && is_indirect == o.is_indirect &&
-           fp == o.fp;
+    return is_injective_in_loop_idx == o.is_injective_in_loop_idx &&
+           is_indirect == o.is_indirect && fp == o.fp;
   }
 };
 
 struct AccessFpHash {
   size_t operator()(const AccessFp &a) const {
     return std::hash<std::string>{}(a.fp) ^
-           (a.has_loop_idx ? 0x9e3779b97f4a7c15ULL : 0) ^
+           (a.is_injective_in_loop_idx ? 0x9e3779b97f4a7c15ULL : 0) ^
            (a.is_indirect ? 0xc2b2ae3d27d4eb4fULL : 0);
   }
 };
@@ -222,6 +267,28 @@ using LoadMap = std::unordered_map<LocalLoadStmt *, Stmt *>;
 //     fingerprint as unequal, which forces a mismatch and rejects
 //     fusion - safe).
 //
+// Injectivity tracking (out_is_injective_in_loop_idx):
+//   The caller's flag is set to true iff the expression *as a whole* is
+//   a provably-injective function of the loop index. Recursion uses
+//   *local* bools and combines them with per-operator rules:
+//     - LoopIndexStmt                       : injective.
+//     - add/sub  i, c   (c compile-time const) : injective if i is.
+//     - mul      i, c   (c non-zero const)    : injective if i is.
+//     - bit_shl  i, c   (c const)            : injective if i is.
+//     - bit_xor  i, c   (c const)            : injective if i is.
+//     - neg / bit_not / cast_bits            : injective if operand is.
+//     - EP / GP / MP                         : injective if at least one
+//                                              index is independently
+//                                              injective.
+//     - LocalLoad (resolved)                 : passes through to the
+//                                              stored value.
+//     - everything else                      : NOT classified injective
+//                                              (div, mod, max, min,
+//                                              bit_and, bit_or, shr,
+//                                              cmp, cast_value, math).
+//   We never OR-cumulate the flag across unrelated subtrees, because
+//   `(i + 1) / 2` is *not* injective even though `(i + 1)` is.
+//
 // depth is bounded to prevent runaway recursion on pathological IR.
 // `inside_index` is true when fingerprinting an index sub-expression
 // of an outer ExternalPtrStmt / GlobalPtrStmt / MatrixPtrStmt. Loads
@@ -230,7 +297,7 @@ using LoadMap = std::unordered_map<LocalLoadStmt *, Stmt *>;
 // indirected accesses.
 std::string fingerprint_value(Stmt *s,
                               int depth,
-                              bool &out_has_loop_idx,
+                              bool &out_is_injective_in_loop_idx,
                               bool &out_is_indirect,
                               bool inside_index,
                               const LoadMap *load_map) {
@@ -240,10 +307,16 @@ std::string fingerprint_value(Stmt *s,
   if (!s) {
     return "N";
   }
+  // LoopIndexStmt is the base case: thread T contributes exactly one
+  // value of L, and this is the only "interesting" injective leaf.
   if (auto *li = s->cast<LoopIndexStmt>()) {
-    out_has_loop_idx = true;
+    out_is_injective_in_loop_idx = true;
     return "L" + std::to_string(li->index);
   }
+  // Constants and launch-invariant values. These do not depend on the
+  // loop index, so they never set out_is_injective_in_loop_idx. They are
+  // still useful "neutral" operands for injectivity-preserving ops like
+  // add-by-const and mul-by-const above.
   if (auto *c = s->cast<ConstStmt>()) {
     return "C" + c->val.stringify();
   }
@@ -258,104 +331,198 @@ std::string fingerprint_value(Stmt *s,
   if (auto *gt = s->cast<GlobalTemporaryStmt>()) {
     return "GT" + std::to_string(gt->offset);
   }
+  // LocalLoad of a resolved alloca is *transparent* - its injectivity
+  // class is exactly the resolved value's class. Pass the caller's
+  // flag through by reference so a loop-index-derived alloca slot can
+  // be classified as injective.
   if (auto *ll = s->cast<LocalLoadStmt>()) {
     if (load_map) {
       auto it = load_map->find(ll);
       if (it != load_map->end()) {
-        return fingerprint_value(it->second, depth + 1, out_has_loop_idx,
-                                 out_is_indirect, inside_index, load_map);
+        return fingerprint_value(it->second, depth + 1,
+                                 out_is_injective_in_loop_idx, out_is_indirect,
+                                 inside_index, load_map);
       }
     }
     // Could not resolve. Emit a stable token keyed on the alloca/src
     // pointer; two unresolved LocalLoads from the same alloca within
     // the same body fingerprint identically (still pointer-based, so
-    // doesn't match across A and B).
+    // doesn't match across A and B). Use a throwaway local flag for
+    // any recursion into ll->src so an unresolved load can't leak a
+    // bogus injectivity claim to the caller.
     std::ostringstream oss;
     if (auto *alloca = ll->src->cast<AllocaStmt>()) {
       oss << "LL_alloca_" << reinterpret_cast<uintptr_t>(alloca);
     } else {
+      bool ll_inj_local = false;
       oss << "LL("
-          << fingerprint_value(ll->src, depth + 1, out_has_loop_idx,
+          << fingerprint_value(ll->src, depth + 1, ll_inj_local,
                                out_is_indirect, inside_index, load_map)
           << ")";
     }
     return oss.str();
   }
+  // GlobalLoadStmt: the loaded value is a runtime quantity. Even if it
+  // is derived from an injective address inside its src, the loaded
+  // *value* is not a statically known function of the loop index and
+  // is not injective in it in general. Recurse into the src with a
+  // local flag so the loaded value's injectivity claim is discarded.
+  // Indirect-flag still propagates via out_is_indirect by reference.
   if (auto *gl = s->cast<GlobalLoadStmt>()) {
-    // A GlobalLoadStmt whose src is a GlobalTemporaryStmt is a
-    // launch-invariant scalar (loop-invariant across all threads);
-    // safe inside an address. A GlobalLoadStmt whose src is an
-    // ExternalPtrStmt / GlobalPtrStmt is an indirection through
-    // another ndarray / snode - the loaded value depends on thread
-    // index in a way we can't analyse, so flag the whole address as
-    // indirect.
     if (inside_index && gl->src &&
         (gl->src->is<ExternalPtrStmt>() || gl->src->is<GlobalPtrStmt>() ||
          gl->src->is<MatrixPtrStmt>())) {
       out_is_indirect = true;
     }
+    bool gl_inj_local = false;
     return "R(" +
-           fingerprint_value(gl->src, depth + 1, out_has_loop_idx,
-                             out_is_indirect, inside_index, load_map) +
+           fingerprint_value(gl->src, depth + 1, gl_inj_local, out_is_indirect,
+                             inside_index, load_map) +
            ")";
   }
+  // ExternalPtr / GlobalPtr / MatrixPtr: the address is injective iff
+  // at least one index sub-expression is independently injective. We
+  // recurse into each index with a *local* flag and only set the
+  // caller's flag once at the end. The base-ptr / origin sub-tree is
+  // loop-invariant so its injectivity claim is discarded.
   if (auto *ep = s->cast<ExternalPtrStmt>()) {
+    bool base_inj_local = false;
     std::string base_fp =
-        fingerprint_value(ep->base_ptr, depth + 1, out_has_loop_idx,
+        fingerprint_value(ep->base_ptr, depth + 1, base_inj_local,
                           out_is_indirect, inside_index, load_map);
+    bool any_idx_inj = false;
     std::ostringstream oss;
     oss << "EP(" << base_fp << ",[";
     for (size_t i = 0; i < ep->indices.size(); i++) {
       if (i > 0)
         oss << ",";
-      // Indices recurse with inside_index=true so any nested
-      // ExternalPtr/GlobalPtr loads get flagged as indirect.
-      oss << fingerprint_value(ep->indices[i], depth + 1, out_has_loop_idx,
+      bool idx_inj_local = false;
+      oss << fingerprint_value(ep->indices[i], depth + 1, idx_inj_local,
                                out_is_indirect, /*inside_index=*/true,
                                load_map);
+      if (idx_inj_local)
+        any_idx_inj = true;
     }
     oss << "]";
     if (ep->is_grad)
       oss << "G";
     oss << ")";
+    if (any_idx_inj)
+      out_is_injective_in_loop_idx = true;
     return oss.str();
   }
   if (auto *gp = s->cast<GlobalPtrStmt>()) {
+    bool any_idx_inj = false;
     std::ostringstream oss;
     oss << "GP(" << reinterpret_cast<uintptr_t>(gp->snode) << ",[";
     for (size_t i = 0; i < gp->indices.size(); i++) {
       if (i > 0)
         oss << ",";
-      oss << fingerprint_value(gp->indices[i], depth + 1, out_has_loop_idx,
+      bool idx_inj_local = false;
+      oss << fingerprint_value(gp->indices[i], depth + 1, idx_inj_local,
                                out_is_indirect, /*inside_index=*/true,
                                load_map);
+      if (idx_inj_local)
+        any_idx_inj = true;
     }
     oss << "])";
+    if (any_idx_inj)
+      out_is_injective_in_loop_idx = true;
     return oss.str();
   }
   if (auto *mp = s->cast<MatrixPtrStmt>()) {
+    bool origin_inj_local = false;
+    bool offset_inj_local = false;
     std::string o_fp =
-        fingerprint_value(mp->origin, depth + 1, out_has_loop_idx,
+        fingerprint_value(mp->origin, depth + 1, origin_inj_local,
                           out_is_indirect, inside_index, load_map);
     std::string off_fp =
-        fingerprint_value(mp->offset, depth + 1, out_has_loop_idx,
+        fingerprint_value(mp->offset, depth + 1, offset_inj_local,
                           out_is_indirect, /*inside_index=*/true, load_map);
+    if (origin_inj_local || offset_inj_local)
+      out_is_injective_in_loop_idx = true;
     return "MP(" + o_fp + "," + off_fp + ")";
   }
+  // BinaryOp: per-operator injectivity. We recurse with local flags so
+  // that, e.g., (i + 1) is correctly classified as injective while
+  // (i + 1) // 2 - whose left operand recursively contains an
+  // injective sub-expression - is correctly classified as NOT
+  // injective.
   if (auto *bin = s->cast<BinaryOpStmt>()) {
+    bool lhs_inj_local = false;
+    bool rhs_inj_local = false;
     std::string lhs_fp =
-        fingerprint_value(bin->lhs, depth + 1, out_has_loop_idx,
-                          out_is_indirect, inside_index, load_map);
+        fingerprint_value(bin->lhs, depth + 1, lhs_inj_local, out_is_indirect,
+                          inside_index, load_map);
     std::string rhs_fp =
-        fingerprint_value(bin->rhs, depth + 1, out_has_loop_idx,
-                          out_is_indirect, inside_index, load_map);
+        fingerprint_value(bin->rhs, depth + 1, rhs_inj_local, out_is_indirect,
+                          inside_index, load_map);
+    bool this_inj = false;
+    switch (bin->op_type) {
+      // i + c, i - c, c + i, c - i: bijection on the lane's range when
+      // c is a compile-time constant (which it is for stride/offset
+      // arithmetic emitted by the front-end).
+      case BinaryOpType::add:
+      case BinaryOpType::sub:
+        this_inj = (lhs_inj_local && is_compile_time_const(bin->rhs)) ||
+                   (rhs_inj_local && is_compile_time_const(bin->lhs));
+        break;
+      // i * c, c * i: bijection iff c is a non-zero compile-time
+      // constant. c == 0 collapses every thread onto address 0; we
+      // reject that case explicitly. Overflow inside int32 is not a
+      // safety issue for fusion because pre- and post-fusion produce
+      // the same wrapped result, but a non-injective wrap-collision
+      // is impossible across a single loop's range for typical stride
+      // constants - the operands here are emitted by index arithmetic
+      // and would have already broken the kernel if they wrapped.
+      case BinaryOpType::mul:
+        this_inj = (lhs_inj_local && is_nonzero_compile_time_const(bin->rhs)) ||
+                   (rhs_inj_local && is_nonzero_compile_time_const(bin->lhs));
+        break;
+      // i << c: equivalent to i * 2^c, bijective for any const c.
+      case BinaryOpType::bit_shl:
+        this_inj = lhs_inj_local && is_compile_time_const(bin->rhs);
+        break;
+      // i ^ c, c ^ i: XOR with a constant is a bijection on the
+      // integer bit pattern. Used by some hash-style index codes.
+      case BinaryOpType::bit_xor:
+        this_inj = (lhs_inj_local && is_compile_time_const(bin->rhs)) ||
+                   (rhs_inj_local && is_compile_time_const(bin->lhs));
+        break;
+      // Everything else - truediv, floordiv, mod, max, min, bit_and,
+      // bit_or, bit_shr, bit_sar, pow, atan2, cmp_*, logical_*, ... -
+      // is NOT provably injective in the loop index and falls into the
+      // conservative "reject" bucket. This is what catches the
+      // arr[i // 2] / arr[i % 2] / arr[min(i, K)] / arr[i & 1] family
+      // of patterns the reviewer flagged.
+      default:
+        break;
+    }
+    if (this_inj)
+      out_is_injective_in_loop_idx = true;
     return "B" + std::to_string(static_cast<int>(bin->op_type)) + "(" + lhs_fp +
            "," + rhs_fp + ")";
   }
+  // UnaryOp: only the handful that are bijections preserve
+  // injectivity; everything else (cast_value, sqrt, abs, sgn, sin,
+  // cos, log, exp, ...) is rejected.
   if (auto *un = s->cast<UnaryOpStmt>()) {
+    bool op_inj_local = false;
     std::string o_fp =
-        fingerprint_value(un->operand, depth + 1, out_has_loop_idx,
-                          out_is_indirect, inside_index, load_map);
+        fingerprint_value(un->operand, depth + 1, op_inj_local, out_is_indirect,
+                          inside_index, load_map);
+    bool this_inj = false;
+    switch (un->op_type) {
+      case UnaryOpType::neg:
+      case UnaryOpType::bit_not:
+      case UnaryOpType::cast_bits:
+        this_inj = op_inj_local;
+        break;
+      default:
+        break;
+    }
+    if (this_inj)
+      out_is_injective_in_loop_idx = true;
     return "U" + std::to_string(static_cast<int>(un->op_type)) + "(" + o_fp +
            ")";
   }
@@ -370,10 +537,11 @@ std::string fingerprint_value(Stmt *s,
 
 AccessFp make_access_fp(Stmt *ptr, const LoadMap *load_map) {
   AccessFp afp;
-  afp.has_loop_idx = false;
+  afp.is_injective_in_loop_idx = false;
   afp.is_indirect = false;
-  afp.fp = fingerprint_value(ptr, 0, afp.has_loop_idx, afp.is_indirect,
-                             /*inside_index=*/false, load_map);
+  afp.fp =
+      fingerprint_value(ptr, 0, afp.is_injective_in_loop_idx, afp.is_indirect,
+                        /*inside_index=*/false, load_map);
   return afp;
 }
 
@@ -911,7 +1079,8 @@ FuseReject can_fuse_with_reason(OffloadedStmt *a, OffloadedStmt *b) {
     add_fps(a_acc.reads);
     add_fps(b_acc.writes);
     add_fps(b_acc.reads);
-    bool admit = all_fps.size() == 1 && all_fps.begin()->has_loop_idx &&
+    bool admit = all_fps.size() == 1 &&
+                 all_fps.begin()->is_injective_in_loop_idx &&
                  !all_fps.begin()->is_indirect;
     if (!admit) {
       return reason;
