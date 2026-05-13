@@ -174,9 +174,7 @@ def test_fuse_raw_noninjective_floordiv():
     # Each surviving value must be one of {2k, 2k+1} for its slot k.
     expected_lo = np.arange(0, N, 2, dtype=np.float32)
     expected_hi = np.arange(1, N, 2, dtype=np.float32)
-    assert np.all((even == expected_lo) | (even == expected_hi)), (
-        f"unexpected survivors: {even[:8].tolist()}"
-    )
+    assert np.all((even == expected_lo) | (even == expected_hi)), f"unexpected survivors: {even[:8].tolist()}"
 
 
 @test_utils.test()
@@ -193,9 +191,7 @@ def test_fuse_raw_noninjective_mod():
     out = _run_combined(wr, 4)
     for offset in range(4):
         group = out[offset::4]
-        assert np.all(group == group[0]), (
-            f"group {offset} not uniform: first 8 = {group[:8].tolist()}"
-        )
+        assert np.all(group == group[0]), f"group {offset} not uniform: first 8 = {group[:8].tolist()}"
 
 
 @test_utils.test()
@@ -211,12 +207,8 @@ def test_fuse_raw_noninjective_bitand():
     out = _run_combined(wr, 2)
     even = out[0:N:2]
     odd = out[1:N:2]
-    assert np.all(even == even[0]), (
-        f"even group not uniform: first 8 = {even[:8].tolist()}"
-    )
-    assert np.all(odd == odd[0]), (
-        f"odd group not uniform: first 8 = {odd[:8].tolist()}"
-    )
+    assert np.all(even == even[0]), f"even group not uniform: first 8 = {even[:8].tolist()}"
+    assert np.all(odd == odd[0]), f"odd group not uniform: first 8 = {odd[:8].tolist()}"
 
 
 @test_utils.test()
@@ -234,9 +226,7 @@ def test_fuse_raw_noninjective_min():
 
     out = _run_combined(wr, K + 1)
     clamped = out[K:]
-    assert np.all(clamped == clamped[0]), (
-        f"clamped tail not uniform: first 8 = {clamped[:8].tolist()}"
-    )
+    assert np.all(clamped == clamped[0]), f"clamped tail not uniform: first 8 = {clamped[:8].tolist()}"
 
 
 @test_utils.test()
@@ -254,6 +244,4 @@ def test_fuse_raw_noninjective_constant_index():
             o[i] = a[0]
 
     out = _run_combined(wr, 1)
-    assert np.all(out == out[0]), (
-        f"out is non-uniform under arr[0]; first 8 = {out[:8].tolist()}"
-    )
+    assert np.all(out == out[0]), f"out is non-uniform under arr[0]; first 8 = {out[:8].tolist()}"
