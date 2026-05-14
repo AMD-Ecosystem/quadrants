@@ -33,8 +33,8 @@
 // dofs_state.acc, clear ...). Those produce one kernel dispatch each
 // today; this pass fuses them.
 //
-// Same-thread RAW relaxation (QD_AGGRESSIVE_KERNEL_FUSION_RAW=1). When two adjacent
-// offloads share a resource we additionally check whether *every*
+// Same-thread RAW relaxation (QD_AGGRESSIVE_KERNEL_FUSION_RAW=1). When two
+// adjacent offloads share a resource we additionally check whether *every*
 // access to that resource (in either body) uses the same per-thread
 // address fingerprint AND that address is a *provably injective*
 // function of the loop index. Injectivity here means the mapping
@@ -723,9 +723,9 @@ Resource extract_resource(Stmt *ptr) {
 //
 // For each resource we also record the set of address fingerprints
 // observed at every write / read of that resource. This is consumed
-// by the same-thread RAW check (QD_AGGRESSIVE_KERNEL_FUSION_RAW=1) to prove that
-// each byte touched by both A and B is only touched by the same
-// thread index in both bodies.
+// by the same-thread RAW check (QD_AGGRESSIVE_KERNEL_FUSION_RAW=1) to prove
+// that each byte touched by both A and B is only touched by the same thread
+// index in both bodies.
 class CollectGlobalAccesses : public BasicStmtVisitor {
  public:
   using FpSet = std::unordered_set<AccessFp, AccessFpHash>;
@@ -1031,11 +1031,11 @@ FuseReject can_fuse_with_reason(OffloadedStmt *a, OffloadedStmt *b) {
   // Per-resource conflict check. A pair (A,B) is racy on a resource
   // iff that resource is touched by both bodies *and* at least one
   // body writes to it. Under the default policy we reject any such
-  // conflict. Under same-thread RAW relaxation (QD_AGGRESSIVE_KERNEL_FUSION_RAW=1)
-  // we instead check whether every access (write or read) to the
-  // shared resource in either body has the same per-thread address
-  // fingerprint, in which case thread T touches the same byte in
-  // both A and B and no other thread races against it.
+  // conflict. Under same-thread RAW relaxation
+  // (QD_AGGRESSIVE_KERNEL_FUSION_RAW=1) we instead check whether every access
+  // (write or read) to the shared resource in either body has the same
+  // per-thread address fingerprint, in which case thread T touches the same
+  // byte in both A and B and no other thread races against it.
   const bool raw = raw_enabled();
   std::unordered_set<Resource, ResourceHash> all_resources;
   for (const auto &kv : a_acc.writes)
