@@ -415,21 +415,6 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     QD_NOT_IMPLEMENTED
   }
 
-  // Pin amdgpu-flat-work-group-size on the current kernel function (the
-  // `func` member set by init_offloaded_task_function) to the exact
-  // dispatch shape. The base codegen leaves this attribute unset, so the
-  // inheritance loop in jit_amdgpu.cpp falls back to the conservative
-  // "1,128" bound for every body function. Setting it here lets the
-  // AMDGPU backend fold __ockl_get_local_size to a constant, tightens
-  // VGPR/SGPR allocator decisions, and propagates the tight bound to all
-  // body functions via the inheritance loop.
-  void set_amdgpu_flat_work_group_size(int block_dim) {
-    if (func && block_dim > 0) {
-      auto wgs = std::to_string(block_dim);
-      func->addFnAttr("amdgpu-flat-work-group-size", wgs + "," + wgs);
-    }
-  }
-
   void emit_amdgpu_gc(OffloadedStmt *stmt) {
     auto snode_id = tlctx->get_constant(stmt->snode->id);
     {
@@ -438,7 +423,6 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       finalize_offloaded_task_function();
       current_task->grid_dim = compile_config.saturating_grid_dim;
       current_task->block_dim = 64;
-      set_amdgpu_flat_work_group_size(current_task->block_dim);
       offloaded_tasks.push_back(*current_task);
       current_task = nullptr;
     }
@@ -448,7 +432,6 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       finalize_offloaded_task_function();
       current_task->grid_dim = 1;
       current_task->block_dim = 1;
-      set_amdgpu_flat_work_group_size(current_task->block_dim);
       offloaded_tasks.push_back(*current_task);
       current_task = nullptr;
     }
@@ -458,7 +441,6 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       finalize_offloaded_task_function();
       current_task->grid_dim = compile_config.saturating_grid_dim;
       current_task->block_dim = 64;
-      set_amdgpu_flat_work_group_size(current_task->block_dim);
       offloaded_tasks.push_back(*current_task);
       current_task = nullptr;
     }
@@ -697,7 +679,6 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       current_task->dynamic_shared_array_bytes = dynamic_shared_array_bytes;
       QD_ASSERT(current_task->grid_dim != 0);
       QD_ASSERT(current_task->block_dim != 0);
-      set_amdgpu_flat_work_group_size(current_task->block_dim);
       offloaded_tasks.push_back(*current_task);
       current_task = nullptr;
       dynamic_shared_array_bytes = 0;
