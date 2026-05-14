@@ -787,7 +787,7 @@ void offload(IRNode *root, const CompileConfig &config) {
   }
   // Fuse adjacent range_for OffloadedStmt's with identical launch
   // bounds and disjoint global access sets. No-op unless
-  // QD_FUSE_TASKS is set. Runs *after* FixCrossOffloadReferences so
+  // QD_AGGRESSIVE_KERNEL_FUSION is set. Runs *after* FixCrossOffloadReferences so
   // that OffloadedStmt::begin_offset / end_offset are populated with
   // their final gtmp byte offsets - those are what we use to test
   // "same dynamic bound" across two adjacent offloads.

@@ -33,7 +33,7 @@
 // dofs_state.acc, clear ...). Those produce one kernel dispatch each
 // today; this pass fuses them.
 //
-// Same-thread RAW relaxation (QD_FUSE_TASKS_RAW=1). When two adjacent
+// Same-thread RAW relaxation (QD_AGGRESSIVE_KERNEL_FUSION_RAW=1). When two adjacent
 // offloads share a resource we additionally check whether *every*
 // access to that resource (in either body) uses the same per-thread
 // address fingerprint AND that address is a *provably injective*
@@ -74,10 +74,14 @@
 // value) on every dynamic offload and incorrectly fuse unrelated
 // tasks, producing GPU memory faults.
 //
-// Enabled by default. Set QD_FUSE_TASKS=0 (or off/false/no) to bypass
-// the pass entirely. Set QD_FUSE_TASKS_RAW=0 to keep fusion on but
-// disable the same-thread RAW relaxation, falling back to the
-// disjoint-resources policy only.
+// Disabled by default. Set QD_AGGRESSIVE_KERNEL_FUSION=1 (or on/true/
+// yes) to enable the pass; this is an opt-in feature - workloads must
+// validate fusion against their own correctness and perf criteria
+// before enabling. With the master flag on, set
+// QD_AGGRESSIVE_KERNEL_FUSION_RAW=0 to keep fusion on but disable the
+// same-thread RAW relaxation, falling back to the disjoint-resources
+// policy only. Set QD_AGGRESSIVE_KERNEL_FUSION_DIAG=1 to print per-
+// kernel fusion decisions and reject reasons to stderr.
 
 #include "quadrants/ir/ir.h"
 #include "quadrants/ir/statements.h"
@@ -719,7 +723,7 @@ Resource extract_resource(Stmt *ptr) {
 //
 // For each resource we also record the set of address fingerprints
 // observed at every write / read of that resource. This is consumed
-// by the same-thread RAW check (QD_FUSE_TASKS_RAW=1) to prove that
+// by the same-thread RAW check (QD_AGGRESSIVE_KERNEL_FUSION_RAW=1) to prove that
 // each byte touched by both A and B is only touched by the same
 // thread index in both bodies.
 class CollectGlobalAccesses : public BasicStmtVisitor {
@@ -808,15 +812,20 @@ class CollectGlobalAccesses : public BasicStmtVisitor {
   }
 };
 
-// Coarse compile-config knob: enabled by default. Set QD_FUSE_TASKS=0
-// (or off/false/no) to bypass the pass entirely; this is the kill
-// switch if a workload exposes a fusion-related issue we haven't
-// already covered by the safety analysis.
+// Coarse compile-config knob: *disabled by default*. Set
+// QD_AGGRESSIVE_KERNEL_FUSION to a truthy value (1 / on / true / yes)
+// to enable the pass; default behaviour is the historical "no fusion"
+// pipeline. The pass is opt-in because a) it has no register-pressure
+// / LDS / I-cache cost model so it can regress occupancy-bound kernels
+// after fusion, and b) the same-thread RAW relaxation is a syntactic
+// safety check, not a real loop-dependence analysis. Workloads that
+// have been validated under fusion (currently: Genesis on AMDGPU) can
+// opt in via this env var.
 bool fuse_enabled() {
   static const bool enabled = []() {
-    const char *flag = std::getenv("QD_FUSE_TASKS");
+    const char *flag = std::getenv("QD_AGGRESSIVE_KERNEL_FUSION");
     if (!flag || flag[0] == '\0')
-      return true;
+      return false;
     std::string s(flag);
     for (auto &c : s)
       c = (char)std::tolower((unsigned char)c);
@@ -829,7 +838,7 @@ bool fuse_enabled() {
 
 bool diag_enabled() {
   static const bool enabled = []() {
-    const char *flag = std::getenv("QD_FUSE_TASKS_DIAG");
+    const char *flag = std::getenv("QD_AGGRESSIVE_KERNEL_FUSION_DIAG");
     return flag != nullptr && flag[0] != '\0' && flag[0] != '0';
   }();
   return enabled;
@@ -846,11 +855,11 @@ bool diag_enabled() {
 // reads arr[T], and no other thread touches arr[T] post-fusion.
 //
 // Defaults to on when fusion is enabled because it gave a consistent
-// throughput lift in benchmarking. Set QD_FUSE_TASKS_RAW=0 to disable
-// (kill switch); the resource-disjoint policy still applies.
+// throughput lift in benchmarking. Set QD_AGGRESSIVE_KERNEL_FUSION_RAW=0
+// to disable (kill switch); the resource-disjoint policy still applies.
 bool raw_enabled() {
   static const bool enabled = []() {
-    const char *flag = std::getenv("QD_FUSE_TASKS_RAW");
+    const char *flag = std::getenv("QD_AGGRESSIVE_KERNEL_FUSION_RAW");
     if (!flag || flag[0] == '\0')
       return true;
     std::string s = flag;
@@ -1022,7 +1031,7 @@ FuseReject can_fuse_with_reason(OffloadedStmt *a, OffloadedStmt *b) {
   // Per-resource conflict check. A pair (A,B) is racy on a resource
   // iff that resource is touched by both bodies *and* at least one
   // body writes to it. Under the default policy we reject any such
-  // conflict. Under same-thread RAW relaxation (QD_FUSE_TASKS_RAW=1)
+  // conflict. Under same-thread RAW relaxation (QD_AGGRESSIVE_KERNEL_FUSION_RAW=1)
   // we instead check whether every access (write or read) to the
   // shared resource in either body has the same per-thread address
   // fingerprint, in which case thread T touches the same byte in

@@ -27,7 +27,16 @@ The tests below assert the appropriate invariant for each pattern.
 Every non-injective test below would fail before the tightened
 fingerprint landed (the same-thread RAW relaxation would have admitted
 the fusion, breaking the grouping invariant).
+
+The fusion pass is opt-in (off by default), so this module enables it
+explicitly via QD_AGGRESSIVE_KERNEL_FUSION=1 *before* importing
+quadrants. The flag is read once on first use of the pass, so it must
+be set before any kernel is compiled.
 """
+
+import os
+
+os.environ["QD_AGGRESSIVE_KERNEL_FUSION"] = "1"
 
 import numpy as np
 
