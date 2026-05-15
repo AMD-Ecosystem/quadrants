@@ -1725,6 +1725,36 @@ void gpu_parallel_range_for_fixed_config_no_loop(
   if (epilogue)
     epilogue(context, tls_ptr);
 }
+
+// Stricter variant of `_no_loop`: the launch grid exactly covers [begin,end):
+//   (end - begin) % block_dim == 0
+//   grid_dim * block_dim == (end - begin)
+// Then `idx < end` is provably true on the first (and only) iteration for
+// every active thread, and the per-iteration EXEC-mask guard
+// (s_and_saveexec_b64 / s_cbranch_execz) lowered from the `idx < end` check
+// is dead. This template performs a single unconditional body invocation,
+// removing the guard from the entry of the sub-range body. Compounds with
+// `_no_loop`'s SGPR savings.
+__attribute__((always_inline)) void
+gpu_parallel_range_for_fixed_config_no_loop_no_guard(
+    RuntimeContext *context,
+    int begin,
+    int /*end*/,
+    int fixed_block_dim,
+    int /*fixed_grid_dim*/,
+    range_for_xlogue prologue,
+    RangeForTaskFunc *func,
+    range_for_xlogue epilogue,
+    const std::size_t /*tls_size*/) {
+  int idx = thread_idx() + fixed_block_dim * block_idx() + begin;
+  alignas(8) char tls_buffer[64];
+  auto tls_ptr = &tls_buffer[0];
+  if (prologue)
+    prologue(context, tls_ptr);
+  func(context, tls_ptr, idx);
+  if (epilogue)
+    epilogue(context, tls_ptr);
+}
 #endif
 
 struct mesh_task_helper_context {

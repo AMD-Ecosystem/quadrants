@@ -3,6 +3,9 @@
 #include <vector>
 #include <set>
 #include <functional>
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
 
 #include "quadrants/common/core.h"
 #include "quadrants/util/io.h"
@@ -223,6 +226,29 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     return grid_dim;
   }
 
+  // True iff the planned launch grid exactly covers the iteration range, so
+  // that every thread in every block executes the body exactly once and the
+  // `while (idx < end)` guard is provably dead. Requires:
+  //   - bounds are compile-time constants
+  //   - block_dim divides (end - begin)
+  //   - effective grid_dim * block_dim == (end - begin)
+  bool grid_exactly_covers_range(OffloadedStmt *stmt) {
+    if (!stmt->const_begin || !stmt->const_end)
+      return false;
+    if (stmt->block_dim <= 0)
+      return false;
+    int num_threads = stmt->end_value - stmt->begin_value;
+    if (num_threads <= 0)
+      return false;
+    if ((num_threads % stmt->block_dim) != 0)
+      return false;
+    int eff_grid_dim = get_effective_range_grid_dim(stmt);
+    if (eff_grid_dim <= 0)
+      return false;
+    return (int64_t)eff_grid_dim * (int64_t)stmt->block_dim ==
+           (int64_t)num_threads;
+  }
+
   void create_offload_range_for(OffloadedStmt *stmt) override {
     auto tls_prologue = create_xlogue(stmt->tls_prologue);
 
@@ -252,21 +278,47 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
 
     auto [begin, end] = get_range_for_bounds(stmt);
     const int effective_grid_dim = get_effective_range_grid_dim(stmt);
-    // The no-loop runtime variant assumes block_dim * grid_dim >=
-    // end - begin so the grid covers the iteration space in one pass.
-    // const_begin && const_end alone is NOT sufficient: offload.cpp
-    // initializes grid_dim to config.saturating_grid_dim, and
-    // get_effective_range_grid_dim only takes min(saturating, exact),
-    // never max. Whenever num_threads > saturating_grid_dim *
-    // block_dim (e.g. test_parallel_range_for at 1M iters with
-    // block_dim=8, or runtime RNG state init at ~10M states), the
-    // grid is undersized and the looping entry must be used to
-    // process the rest of the range via the grid-stride loop.
+    // Three-way runtime template selection ordered most-specific first:
+    //
+    //   _no_loop_no_guard  : const bounds, exact-divisible, grid*block_dim ==
+    //                        (end - begin). Drops both the grid-stride loop
+    //                        and the per-thread `idx < end` EXEC-mask guard.
+    //   _no_loop           : const bounds, grid*block_dim >= (end - begin)
+    //                        (allows non-divisible). Drops the grid-stride
+    //                        loop but keeps the per-thread tail guard.
+    //   (default)          : grid is undersized for the range; original
+    //                        grid-stride loop with guard.
+    //
+    // const_begin && const_end alone is not sufficient for the no-loop
+    // variants: offload.cpp initializes grid_dim to
+    // config.saturating_grid_dim, and get_effective_range_grid_dim only
+    // takes min(saturating, exact). Whenever num_threads >
+    // saturating_grid_dim * block_dim (e.g. test_parallel_range_for at
+    // 1M iters with block_dim=8, runtime RNG state init at ~10M states),
+    // the grid is undersized and the original looping entry must run.
+    const bool no_guard = grid_exactly_covers_range(stmt);
     const bool grid_covers_range =
         stmt->const_begin && stmt->const_end &&
         static_cast<int64_t>(effective_grid_dim) * stmt->block_dim >=
             static_cast<int64_t>(stmt->end_value - stmt->begin_value);
-    if (grid_covers_range) {
+    static const bool dbg_no_guard =
+        std::getenv("QD_DEBUG_NO_GUARD") != nullptr;
+    if (dbg_no_guard) {
+      const char *route = no_guard ? "no_guard"
+                                   : grid_covers_range ? "no_loop" : "loop";
+      fprintf(stderr,
+              "[range_for:%s] const_begin=%d const_end=%d begin=%d end=%d "
+              "block_dim=%d eff_grid_dim=%d raw_grid=%d\n",
+              route, (int)stmt->const_begin, (int)stmt->const_end,
+              stmt->begin_value, stmt->end_value, stmt->block_dim,
+              effective_grid_dim, stmt->grid_dim);
+    }
+    if (no_guard) {
+      call("gpu_parallel_range_for_fixed_config_no_loop_no_guard",
+           {get_context(), begin, end, tlctx->get_constant(stmt->block_dim),
+            tlctx->get_constant(effective_grid_dim), tls_prologue, body,
+            epilogue, tlctx->get_constant(stmt->tls_size)});
+    } else if (grid_covers_range) {
       call("gpu_parallel_range_for_fixed_config_no_loop",
            {get_context(), begin, end, tlctx->get_constant(stmt->block_dim),
             tls_prologue, body, epilogue,
@@ -274,9 +326,8 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     } else {
       call("gpu_parallel_range_for_fixed_config",
            {get_context(), begin, end, tlctx->get_constant(stmt->block_dim),
-            tlctx->get_constant(effective_grid_dim),
-            tls_prologue, body, epilogue,
-            tlctx->get_constant(stmt->tls_size)});
+            tlctx->get_constant(effective_grid_dim), tls_prologue, body,
+            epilogue, tlctx->get_constant(stmt->tls_size)});
     }
   }
 
