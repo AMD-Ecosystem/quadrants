@@ -18,6 +18,16 @@ void Dynamic_activate(Ptr meta_, Ptr node_, int i) {
   auto node = (DynamicNode *)(node_);
   // We need to not only update node->n, but also make sure the chunk containing
   // element i is allocated.
+  //
+  // ``atomic_max_i32`` is defined in
+  // ``quadrants/runtime/llvm/runtime_module/atomic.h`` and uses
+  // ``memory_order_seq_cst`` at the default (system) sync scope. On
+  // AMDGPU, codegen-emitted ``qd.atomic_*`` operations use Monotonic
+  // ordering at ``"agent"`` sync scope. The two never touch the same
+  // address: ``node->n`` is runtime-internal SNode metadata that user
+  // kernels reach only through the ``dynamic.append`` /
+  // ``dynamic.length`` abstractions, never via ``qd.atomic_*``. So the
+  // scope mismatch is intentional and safe.
   atomic_max_i32(&node->n, i + 1);
   int chunk_start = 0;
   auto p_chunk_ptr = &node->ptr;
