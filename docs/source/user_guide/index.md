@@ -38,6 +38,7 @@ interop
 
 cuda_graph
 perf_dispatch
+amdgpu_atomics
 ```
 
 ```{toctree}

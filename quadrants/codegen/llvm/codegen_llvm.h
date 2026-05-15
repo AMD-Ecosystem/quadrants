@@ -253,6 +253,33 @@ class TaskCodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
 
   virtual llvm::Value *real_type_atomic(AtomicOpStmt *stmt);
 
+  // Default memory ordering and sync scope used by the atomic-emission
+  // helpers (integral_type_atomic, real_type_atomic, atomic_op_using_cas).
+  // The base class targets the strongest C++ contract
+  // (SequentiallyConsistent + system scope), matching what was emitted
+  // before PR #38. Backend codegens (e.g. TaskCodeGenAMDGPU) override
+  // these to relax atomics to a backend-specific ordering without having
+  // to duplicate the entire atomic-emission logic.
+  virtual llvm::AtomicOrdering default_atomic_ordering() const {
+    return llvm::AtomicOrdering::SequentiallyConsistent;
+  }
+  virtual llvm::SyncScope::ID default_atomic_scope() const {
+    return llvm::SyncScope::System;
+  }
+
+  // Controls whether f32 / f64 ``atomic_min`` / ``atomic_max`` should be
+  // lowered through ``atomic_op_using_cas`` (which honors
+  // ``default_atomic_ordering()`` / ``default_atomic_scope()``) instead of
+  // falling through to the SeqCst+system runtime helpers
+  // ``atomic_{min,max}_{f32,f64}`` declared in
+  // ``runtime/llvm/runtime_module/atomic.h``. Backends whose
+  // ``default_atomic_scope()`` is not ``System`` MUST override this to
+  // return ``true``; otherwise the same memory location would be touched
+  // at two different sync scopes (UB per the LLVM memory model).
+  virtual bool prefer_cas_for_fp_minmax() const {
+    return false;
+  }
+
   void visit(AtomicOpStmt *stmt) override;
 
   void visit(GlobalPtrStmt *stmt) override;

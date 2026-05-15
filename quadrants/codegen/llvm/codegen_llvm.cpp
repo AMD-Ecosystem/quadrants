@@ -1455,7 +1455,7 @@ llvm::Value *TaskCodeGenLLVM::integral_type_atomic(AtomicOpStmt *stmt) {
   QD_ASSERT(bin_op.find(stmt->op_type) != bin_op.end());
   return builder->CreateAtomicRMW(
       bin_op.at(stmt->op_type), llvm_val[stmt->dest], llvm_val[stmt->val],
-      llvm::MaybeAlign(0), llvm::AtomicOrdering::SequentiallyConsistent);
+      llvm::MaybeAlign(0), default_atomic_ordering(), default_atomic_scope());
 }
 
 llvm::Value *TaskCodeGenLLVM::atomic_op_using_cas(
@@ -1484,14 +1484,20 @@ llvm::Value *TaskCodeGenLLVM::atomic_op_using_cas(
         llvm::PointerType::get(*llvm_context, dest_as);
     llvm::IntegerType *typeIntTy = get_integer_type(bits);
 
-    old_val = builder->CreateLoad(val->getType(), dest);
+    // Use an atomic load (matching the cmpxchg's ordering and scope)
+    // so that LLVM cannot legally hoist this load out of the CAS-retry
+    // loop. An atomic load also requires an explicit natural alignment.
+    auto *initial_load = builder->CreateLoad(val->getType(), dest);
+    initial_load->setAlignment(llvm::Align(std::max(1, bits / 8)));
+    initial_load->setAtomic(default_atomic_ordering(), default_atomic_scope());
+    old_val = initial_load;
     auto new_val = op(old_val, val);
     dest = builder->CreateBitCast(dest, typeIntPtr);
     auto atomicCmpXchg = builder->CreateAtomicCmpXchg(
         dest, builder->CreateBitCast(old_val, typeIntTy),
         builder->CreateBitCast(new_val, typeIntTy), llvm::MaybeAlign(0),
-        AtomicOrdering::SequentiallyConsistent,
-        AtomicOrdering::SequentiallyConsistent);
+        default_atomic_ordering(), default_atomic_ordering(),
+        default_atomic_scope());
     // Check whether CAS was succussful
     auto ok = builder->CreateExtractValue(atomicCmpXchg, 1);
     builder->CreateCondBr(builder->CreateNot(ok), body, after_loop);
@@ -1535,7 +1541,8 @@ llvm::Value *TaskCodeGenLLVM::real_type_atomic(AtomicOpStmt *stmt) {
     case AtomicOpType::add:
       return builder->CreateAtomicRMW(
           llvm::AtomicRMWInst::FAdd, llvm_val[stmt->dest], llvm_val[stmt->val],
-          llvm::MaybeAlign(0), llvm::AtomicOrdering::SequentiallyConsistent);
+          llvm::MaybeAlign(0), default_atomic_ordering(),
+          default_atomic_scope());
     case AtomicOpType::mul:
       return atomic_op_using_cas(
           llvm_val[stmt->dest], llvm_val[stmt->val],
@@ -1543,6 +1550,26 @@ llvm::Value *TaskCodeGenLLVM::real_type_atomic(AtomicOpStmt *stmt) {
           stmt->val->ret_type);
     default:
       break;
+  }
+
+  // Backends that emit atomics at a non-system scope (e.g. AMDGPU at
+  // ``agent`` scope) must avoid the SeqCst+system runtime helpers below
+  // for f32/f64 min/max -- mixing scopes on the same address is UB per
+  // the LLVM / C++ memory model. Route through the CAS path instead,
+  // which honors default_atomic_ordering() / default_atomic_scope().
+  if (prefer_cas_for_fp_minmax()) {
+    if (op == AtomicOpType::min) {
+      return atomic_op_using_cas(
+          llvm_val[stmt->dest], llvm_val[stmt->val],
+          [&](auto v1, auto v2) { return builder->CreateMinNum(v1, v2); },
+          stmt->val->ret_type);
+    }
+    if (op == AtomicOpType::max) {
+      return atomic_op_using_cas(
+          llvm_val[stmt->dest], llvm_val[stmt->val],
+          [&](auto v1, auto v2) { return builder->CreateMaxNum(v1, v2); },
+          stmt->val->ret_type);
+    }
   }
 
   std::unordered_map<PrimitiveTypeID,

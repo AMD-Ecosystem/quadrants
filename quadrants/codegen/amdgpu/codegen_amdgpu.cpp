@@ -35,6 +35,11 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
                     const Kernel *kernel,
                     IRNode *ir = nullptr)
       : TaskCodeGenLLVM(id, config, tlctx, kernel, ir) {
+    // ``llvm_context`` is assigned by TaskCodeGenLLVM::initialize_context
+    // in the base ctor body, so it is non-null here. Cache the agent
+    // sync-scope ID once per codegen instance to avoid the
+    // string-hash lookup on every atomic emission.
+    amdgpu_agent_scope_ = llvm_context->getOrInsertSyncScopeID("agent");
   }
 
   llvm::Value *create_print(std::string tag,
@@ -156,15 +161,35 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
 #undef UNARY_STD
   }
 
-  // AMDGPU sync scope helper. Genesis atomics are producer-consumer
-  // across kernel launches; the launch boundary supplies release/acquire
-  // ordering, so the in-kernel atomic only needs Monotonic ordering at
-  // agent (device) scope. This skips the s_waitcnt vmcnt(0) lgkmcnt(0)
-  // and buffer_inv / buffer_wbinvl1_vol cache-invalidate pair that
-  // SequentiallyConsistent system-scope atomics emit on AMDGPU. Atomics
-  // are still emitted as single-instruction global_atomic_* on gfx942.
-  llvm::SyncScope::ID amdgpu_atomic_scope() {
-    return llvm_context->getOrInsertSyncScopeID("agent");
+  // AMDGPU atomic memory-model contract (validated on gfx942):
+  //   - Monotonic ordering at "agent" sync scope is sufficient for every
+  //     atomic Genesis emits. Producer-consumer ordering between kernels
+  //     is supplied by the HIP stream / kernel-launch boundary, not by
+  //     the atomic itself.
+  //   - This avoids the s_waitcnt vmcnt(0) lgkmcnt(0) plus buffer_inv /
+  //     buffer_wbinvl1_vol cache-invalidate sequence that
+  //     SequentiallyConsistent + system scope would otherwise emit
+  //     around every atomic on AMDGPU.
+  //   - User-visible contract: see docs/source/user_guide/amdgpu_atomics.md.
+  //
+  // The actual relaxation is implemented by overriding two virtuals on
+  // the base class; all atomic-emission logic (integral_type_atomic,
+  // real_type_atomic, atomic_op_using_cas) lives in TaskCodeGenLLVM and
+  // picks these up automatically.
+  llvm::AtomicOrdering default_atomic_ordering() const override {
+    return llvm::AtomicOrdering::Monotonic;
+  }
+  llvm::SyncScope::ID default_atomic_scope() const override {
+    return amdgpu_agent_scope_;
+  }
+
+  // Required because default_atomic_scope() is not ``System``. Without
+  // this, f32/f64 atomic_min / atomic_max would fall through to the
+  // SeqCst+system runtime helpers in atomic.h and any user kernel that
+  // mixes ``qd.atomic_add`` and ``qd.atomic_min/max`` on the same f32 /
+  // f64 field would have undefined behavior per the LLVM memory model.
+  bool prefer_cas_for_fp_minmax() const override {
+    return true;
   }
 
   // Emit reductions as direct LLVM atomics instead of calling runtime
@@ -195,13 +220,13 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
       if (i32_ops.find(op) != i32_ops.end()) {
         return builder->CreateAtomicRMW(
             i32_ops.at(op), dest, val, llvm::MaybeAlign(0),
-            llvm::AtomicOrdering::Monotonic, amdgpu_atomic_scope());
+            default_atomic_ordering(), default_atomic_scope());
       }
     } else if (prim_type == PrimitiveTypeID::f32) {
       if (op == AtomicOpType::add) {
         return builder->CreateAtomicRMW(
             llvm::AtomicRMWInst::FAdd, dest, val, llvm::MaybeAlign(0),
-            llvm::AtomicOrdering::Monotonic, amdgpu_atomic_scope());
+            default_atomic_ordering(), default_atomic_scope());
       } else if (op == AtomicOpType::min) {
         return atomic_op_using_cas(
             dest, val,
@@ -748,8 +773,11 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
         workgroup_dim_, llvm::Type::getInt32Ty(*llvm_context));
     return std::make_tuple(thread_idx, block_dim);
   }
+  // Cached LLVM sync-scope ID for "agent". Populated in the ctor and
+  // returned by default_atomic_scope() so that every atomic emission
+  // skips the per-call string-hash lookup into LLVMContext.
+  llvm::SyncScope::ID amdgpu_agent_scope_{llvm::SyncScope::System};
 };
-
 LLVMCompiledTask KernelCodeGenAMDGPU::compile_task(
     int task_codegen_id,
     const CompileConfig &config,
