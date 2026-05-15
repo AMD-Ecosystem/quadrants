@@ -30,6 +30,15 @@ class QD_DLL_EXPORT Kernel : public Callable {
 
   bool is_accessor{false};
 
+  // Mirror of the Python-side `@qd.kernel(cuda_graph=True)` annotation.
+  // Set by Python before compilation so IR passes can opt out of
+  // transformations that conflict with the cuda_graph dispatch model
+  // (it relies on each top-level for-loop producing its own
+  // OffloadedStmt). The runtime still reads the per-launch flag off
+  // the LaunchContextBuilder; this field is only for compile-time
+  // passes.
+  bool use_cuda_graph{false};
+
   Kernel(Program &program,
          const std::function<void()> &func,
          const std::string &name = "",

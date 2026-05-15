@@ -93,6 +93,22 @@ pip install quadrants
 
 (For how to build from source, see our CI build scripts, e.g. [linux build scripts](.github/workflows/scripts_new/linux_x86/) )
 
+# Environment variables
+
+Optional runtime knobs read once at compile time. Truthy values: `1`, `on`, `true`, `yes` (case-insensitive); anything else (including unset) is off.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `QD_AGGRESSIVE_KERNEL_FUSION` | off | Enables the JIT pass that fuses adjacent `range_for` `OffloadedStmt`s with matching launch bounds into a single GPU dispatch. Opt-in: workloads must validate fusion against their own correctness and perf criteria before enabling. |
+| `QD_AGGRESSIVE_KERNEL_FUSION_RAW` | on (when fusion is enabled) | Allows fusion of pairs that share a resource as long as every access uses the same provably-injective per-thread address (same-thread RAW relaxation). Set to `0` to keep fusion on but restrict it to pairs with strictly disjoint resources. |
+| `QD_AGGRESSIVE_KERNEL_FUSION_DIAG` | off | Prints per-kernel fusion decisions and reject reasons to stderr. Useful when debugging why a workload isn't fusing as expected. |
+
+Example (enable on Linux for the lifetime of one process):
+
+```bash
+QD_AGGRESSIVE_KERNEL_FUSION=1 python my_app.py
+```
+
 # Documentation
 
 - [docs](https://genesis-embodied-ai.github.io/quadrants/user_guide/index.html)
