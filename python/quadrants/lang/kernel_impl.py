@@ -146,7 +146,7 @@ def _kernel_impl(
     _func: Callable,
     level_of_class_stackframe: int,
     verbose: bool = False,
-    cuda_graph: bool = False,
+    graph: bool = False,
     fn_attrs: dict[str, dict[str, str]] | None = None,
 ) -> QuadrantsCallable:
     if fn_attrs:
@@ -159,7 +159,9 @@ def _kernel_impl(
         print(f"kernel={_func.__name__} is_classkernel={is_classkernel}")
     primal = Kernel(_func, autodiff_mode=_NONE, _is_classkernel=is_classkernel)
     adjoint = Kernel(_func, autodiff_mode=_REVERSE, _is_classkernel=is_classkernel)
-    primal.use_cuda_graph = cuda_graph
+    primal.use_graph = graph
+    # Fork-specific: propagate fn_attrs to both primal and adjoint kernels so reverse-mode kernels share the same
+    # AMD-specific function attributes (e.g. amdgpu-waves-per-eu).
     primal.fn_attrs = fn_attrs
     adjoint.fn_attrs = fn_attrs
     # Having |primal| contains |grad| makes the tape work.
@@ -207,7 +209,7 @@ def kernel(
     _fn: None = None,
     *,
     pure: bool = False,
-    cuda_graph: bool = False,
+    graph: bool = False,
     fn_attrs: dict[str, dict[str, str]] | None = None,
 ) -> Callable[[Any], Any]: ...
 
@@ -223,7 +225,7 @@ def kernel(
     _fn: Any,
     *,
     pure: bool = False,
-    cuda_graph: bool = False,
+    graph: bool = False,
     fn_attrs: dict[str, dict[str, str]] | None = None,
 ) -> Any: ...
 
@@ -233,7 +235,7 @@ def kernel(
     *,
     pure: bool | None = None,
     fastcache: bool = False,
-    cuda_graph: bool = False,
+    graph: bool = False,
     fn_attrs: dict[str, dict[str, str]] | None = None,
 ):
     """
@@ -247,7 +249,7 @@ def kernel(
     Kernel's gradient kernel would be generated automatically by the AutoDiff system.
 
     Args:
-        cuda_graph: If True, kernels with 2+ top-level for loops are captured
+        graph: If True, kernels with 2+ top-level for loops are captured
             into a CUDA graph on first launch and replayed on subsequent
             launches, reducing per-kernel launch overhead. Non-CUDA backends
             are not supported currently.
@@ -270,7 +272,7 @@ def kernel(
         else:
             level = 4
 
-        wrapped = _kernel_impl(fn, level_of_class_stackframe=level, cuda_graph=cuda_graph, fn_attrs=fn_attrs)
+        wrapped = _kernel_impl(fn, level_of_class_stackframe=level, graph=graph, fn_attrs=fn_attrs)
         wrapped.is_pure = pure is not None and pure or fastcache
         if pure is not None:
             warnings_helper.warn_once(

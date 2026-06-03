@@ -29,12 +29,7 @@ enum class StmtOpCode : std::uint8_t {
 #undef PER_STATEMENT
 };
 
-enum class ForLoopType : std::uint8_t {
-  StructForOnSNode,
-  StructForOnExternalTensor,
-  MeshFor,
-  RangeFor
-};
+enum class ForLoopType : std::uint8_t { StructForOnSNode, StructForOnExternalTensor, MeshFor, RangeFor };
 
 enum class ExternalFuncType : std::uint8_t {
   SO,
@@ -382,6 +377,7 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
     emit(stmt->strictly_serialized);
     emit(stmt->mem_access_opt);
     emit(stmt->block_dim);
+    emit(stmt->stream_parallel_group_id);
     emit(stmt->body.get());
   }
 
@@ -419,8 +415,7 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
     // Serialize dependent real-functions
     emit(real_funcs_.size());
     for (auto &[func, id] : real_funcs_) {
-      if (auto &ast_str = func->try_get_ast_serialization_data();
-          ast_str.has_value()) {
+      if (auto &ast_str = func->try_get_ast_serialization_data(); ast_str.has_value()) {
         emit_bytes(ast_str->c_str(), ast_str->size());
       }
     }

@@ -3,6 +3,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <thread>
+#include <vector>
 
 #include "quadrants/program/kernel_profiler.h"
 #include "quadrants/rhi/cuda/cuda_driver.h"
@@ -30,7 +31,10 @@ class CUDAContext {
   int max_shared_memory_bytes_;
   bool debug_;
   bool supports_mem_pool_;
-  void *stream_;
+  bool supports_pageable_memory_access_;
+  bool uses_host_page_tables_;
+  static thread_local void *stream_;
+  std::vector<void *> stream_pool_;
 
  public:
   CUDAContext();
@@ -75,10 +79,38 @@ class CUDAContext {
     return compute_capability_;
   }
 
+  int get_max_shared_memory_bytes() const {
+    return max_shared_memory_bytes_;
+  }
+
   int64_t get_clock_rate_khz() const;
 
   bool supports_mem_pool() const {
     return supports_mem_pool_;
+  }
+
+  // Force the default device memory pool to release every cached page back to the driver. Symmetric with the AMDGPU
+  // side and called from `LlvmRuntimeExecutor::finalize` (i.e. `qd.reset()`); see
+  // `AMDGPUContext::trim_default_mem_pool` for the rationale. No-op when mempool support is unavailable.
+  void trim_default_mem_pool();
+
+  // True when the device can coherently dereference plain host pointers (`malloc` / `new`) from kernel code via HMM /
+  // system-allocated memory. Maps `CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS` directly - 1 on Linux with an
+  // HMM-capable driver + kernel (open-source nvidia module or 535+ with HMM enabled), 0 on Turing and older parts,
+  // Windows, and any Linux host without HMM. Used by the adstack sizer launcher to decide whether to stage a device
+  // copy of `RuntimeContext` before each launch.
+  bool supports_pageable_memory_access() const {
+    return supports_pageable_memory_access_;
+  }
+
+  // CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES (= 100). 1 when the device walks the host's
+  // page tables directly via ATS / HPT (Ampere and newer with HMM-equipped drivers, including Blackwell). 0 on
+  // pre-Ampere HMM, where pageable-memory access goes through the legacy fault-and-migrate path. Used by the
+  // adstack sizer launcher (`runtime/cuda/kernel_launcher.cpp`) to decide whether to stage a device-side copy of
+  // `RuntimeContext` before each launch: when host page tables are walked directly the helpers can dereference
+  // the host pointer through ctx, otherwise the launcher stages a device snapshot.
+  bool uses_host_page_tables() const {
+    return uses_host_page_tables_;
   }
 
   ~CUDAContext();
@@ -89,8 +121,7 @@ class CUDAContext {
     void *new_ctx_;
 
    public:
-    explicit ContextGuard(CUDAContext *new_ctx)
-        : old_ctx_(nullptr), new_ctx_(new_ctx->context_) {
+    explicit ContextGuard(CUDAContext *new_ctx) : old_ctx_(nullptr), new_ctx_(new_ctx->context_) {
       CUDADriver::get_instance().context_get_current(&old_ctx_);
       if (old_ctx_ != new_ctx_)
         new_ctx->make_current();
@@ -119,6 +150,23 @@ class CUDAContext {
 
   void *get_stream() const {
     return stream_;
+  }
+
+  void *acquire_stream() {
+    std::lock_guard<std::mutex> _(lock_);
+    if (!stream_pool_.empty()) {
+      auto s = stream_pool_.back();
+      stream_pool_.pop_back();
+      return s;
+    }
+    void *s = nullptr;
+    CUDADriver::get_instance().stream_create(&s, 0x1 /*CU_STREAM_NON_BLOCKING*/);
+    return s;
+  }
+
+  void release_stream(void *s) {
+    std::lock_guard<std::mutex> _(lock_);
+    stream_pool_.push_back(s);
   }
 };
 

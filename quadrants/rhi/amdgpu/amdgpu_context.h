@@ -3,6 +3,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <thread>
+#include <vector>
 
 #include "quadrants/program/kernel_profiler.h"
 #include "quadrants/rhi/amdgpu/amdgpu_driver.h"
@@ -25,6 +26,8 @@ class AMDGPUContext {
   bool debug_{false};
   bool supports_mem_pool_{false};
   std::vector<void *> kernel_arg_pointer_;
+  static thread_local void *stream_;
+  std::vector<void *> stream_pool_;
 
  public:
   AMDGPUContext();
@@ -53,13 +56,10 @@ class AMDGPUContext {
         AMDGPUDriver::get_instance().mem_free(i);
       }
     }
-    kernel_arg_pointer_.erase(kernel_arg_pointer_.begin(),
-                              kernel_arg_pointer_.end());
+    kernel_arg_pointer_.erase(kernel_arg_pointer_.begin(), kernel_arg_pointer_.end());
   }
 
-  void pack_args(std::vector<void *> arg_pointers,
-                 std::vector<int> arg_sizes,
-                 char *arg_packed);
+  void pack_args(std::vector<void *> arg_pointers, std::vector<int> arg_sizes, char *arg_packed);
 
   int get_args_byte(std::vector<int> arg_sizes);
 
@@ -95,19 +95,34 @@ class AMDGPUContext {
     return compute_capability_;
   }
 
+  // Force the default device memory pool to release every cached page back to the driver. Called by
+  // `LlvmRuntimeExecutor::finalize` (i.e. `qd.reset()`) to align actual driver-visible free VRAM with the user-facing
+  // contract that `qd.reset()` releases everything Quadrants allocated. Without this, up to the configured release
+  // threshold (128 MiB at construction) of freed pages stays cached in the pool and shows up as "used" to other
+  // processes on the same VF, materially raising the chance of multi-process `HSA_STATUS_ERROR_OUT_OF_RESOURCES`
+  // failures across pytest-xdist workers. No-op if the device does not advertise mempool support.
+  void trim_default_mem_pool();
+
   ~AMDGPUContext();
 
   class ContextGuard {
    private:
+    // Both fields store HIP driver context handles (opaque `hipCtx_t` aliased as `void *`), NOT
+    // the enclosing `AMDGPUContext *` wrapper pointer. Storing the wrapper address made the
+    // `old_ctx_ != new_ctx_` compare at construction and destruction always evaluate true (the
+    // wrapper address and the HIP handle live in disjoint value spaces), so the guard called
+    // `make_current()` unconditionally on entry and `context_set_current(old_ctx_)` unconditionally
+    // on exit even when the target context was already active. Always-equal semantics are
+    // preserved by storing `new_ctx->get_context()` here.
     void *old_ctx_;
     void *new_ctx_;
 
    public:
-    explicit ContextGuard(AMDGPUContext *new_ctx)
-        : old_ctx_(nullptr), new_ctx_(new_ctx) {
+    explicit ContextGuard(AMDGPUContext *new_ctx) : old_ctx_(nullptr), new_ctx_(new_ctx->get_context()) {
       AMDGPUDriver::get_instance().context_get_current(&old_ctx_);
-      if (old_ctx_ != new_ctx)
+      if (old_ctx_ != new_ctx_) {
         new_ctx->make_current();
+      }
     }
 
     ~ContextGuard() {
@@ -123,6 +138,31 @@ class AMDGPUContext {
 
   std::unique_lock<std::mutex> get_lock_guard() {
     return std::unique_lock<std::mutex>(lock_);
+  }
+
+  void set_stream(void *stream) {
+    stream_ = stream;
+  }
+
+  void *get_stream() const {
+    return stream_;
+  }
+
+  void *acquire_stream() {
+    std::lock_guard<std::mutex> _(lock_);
+    if (!stream_pool_.empty()) {
+      auto s = stream_pool_.back();
+      stream_pool_.pop_back();
+      return s;
+    }
+    void *s = nullptr;
+    AMDGPUDriver::get_instance().stream_create(&s, 0x1 /*HIP_STREAM_NON_BLOCKING*/);
+    return s;
+  }
+
+  void release_stream(void *s) {
+    std::lock_guard<std::mutex> _(lock_);
+    stream_pool_.push_back(s);
   }
 
   static AMDGPUContext &get_instance();

@@ -7,8 +7,7 @@ namespace quadrants::lang {
 void TyVar::unify(int pos, DataType dt, Solutions &solutions) const {
   if (solutions.find(name_) != solutions.end()) {
     if (solutions[name_].first != dt) {
-      throw TyVarMismatch(solutions[name_].second, pos, solutions[name_].first,
-                          dt);
+      throw TyVarMismatch(solutions[name_].second, pos, solutions[name_].first, dt);
     }
   } else {
     solutions[name_] = std::make_pair(dt, pos);
@@ -36,8 +35,7 @@ void TyLub::unify(int pos, DataType dt, Solutions &solutions) const {
 }
 
 DataType TyLub::resolve(const Solutions &solutions) const {
-  return promoted_type(lhs_->resolve(solutions)->get_compute_type(),
-                       rhs_->resolve(solutions)->get_compute_type());
+  return promoted_type(lhs_->resolve(solutions)->get_compute_type(), rhs_->resolve(solutions)->get_compute_type());
 }
 
 std::string TyLub::to_string() const {
@@ -83,15 +81,14 @@ bool TyMono::contains_tyvar(const TyVar &tyvar) const {
 }
 
 std::string TyVarMismatch::to_string() const {
-  return "argument #" + std::to_string(solved_position_ + 1) + " and #" +
-         std::to_string(current_position_ + 1) +
-         " should be the same type, but they are different: " +
-         original_.to_string() + " and " + conflicting_.to_string();
+  return "argument #" + std::to_string(solved_position_ + 1) + " and #" + std::to_string(current_position_ + 1) +
+         " should be the same type, but they are different: " + original_.to_string() + " and " +
+         conflicting_.to_string();
 }
 
 std::string TypeMismatch::to_string() const {
-  return "expected " + param_.to_string() + " for argument #" +
-         std::to_string(position_ + 1) + ", but got " + arg_.to_string();
+  return "expected " + param_.to_string() + " for argument #" + std::to_string(position_ + 1) + ", but got " +
+         arg_.to_string();
 }
 
 std::string TyVarUnsolved::to_string() const {
@@ -100,14 +97,12 @@ std::string TyVarUnsolved::to_string() const {
 }
 
 std::string TraitMismatch::to_string() const {
-  return "the inferred type of argument #" + std::to_string(occurrence_ + 1) +
-         " is " + dt_.to_string() + ", which is not a " +
-         constraint_.trait->to_string();
+  return "the inferred type of argument #" + std::to_string(occurrence_ + 1) + " is " + dt_.to_string() +
+         ", which is not a " + constraint_.trait->to_string();
 }
 
 std::string ArgLengthMismatch::to_string() const {
-  return std::to_string(arg_) + " arguments were passed in but expected " +
-         std::to_string(param_) +
+  return std::to_string(arg_) + " arguments were passed in but expected " + std::to_string(param_) +
          ". this is not supposed to happen; please report this as a bug";
 }
 
@@ -158,9 +153,7 @@ namespace {
 
 int var_counter_ = 0;
 
-#define PRIM(dt) \
-  DataType dt =  \
-      TypeFactory::get_instance().get_primitive_type(PrimitiveTypeID::dt);
+#define PRIM(dt) DataType dt = TypeFactory::get_instance().get_primitive_type(PrimitiveTypeID::dt);
 
 PRIM(i32)
 PRIM(i64)
@@ -178,8 +171,7 @@ Trait *Integral = StaticTraits::get(StaticTraitID::integral);
 Trait *Primitive = StaticTraits::get(StaticTraitID::primitive);
 Trait *Scalar = StaticTraits::get(StaticTraitID::scalar);
 
-[[maybe_unused]] Constraint operator<(std::shared_ptr<TyVar> tyvar,
-                                      Trait *trait) {
+[[maybe_unused]] Constraint operator<(std::shared_ptr<TyVar> tyvar, Trait *trait) {
   return Constraint(tyvar, trait);
 }
 
@@ -207,8 +199,7 @@ std::vector<TypeExpr> type_exprs_from_dts(const std::vector<DataType> &params) {
   return exprs;
 }
 
-std::vector<Stmt *> get_all_rvalues(const std::vector<Expr> &args,
-                                    Expression::FlattenContext *ctx) {
+std::vector<Stmt *> get_all_rvalues(const std::vector<Expr> &args, Expression::FlattenContext *ctx) {
   std::vector<Stmt *> stmts;
   for (auto arg : args) {
     stmts.push_back(flatten_rvalue(arg, ctx));
@@ -234,14 +225,12 @@ Trait *StaticTraits::get(StaticTraitID traitId) {
 }
 
 void StaticTraits::init_traits() {
-  traits_[StaticTraitID::real] =
-      std::make_unique<DynamicTrait>("Real", is_real);
-  traits_[StaticTraitID::integral] =
-      std::make_unique<DynamicTrait>("Integral", is_integral);
-  traits_[StaticTraitID::primitive] = std::make_unique<DynamicTrait>(
-      "Primitive", [](DataType dt) { return dt->is<PrimitiveType>(); });
-  traits_[StaticTraitID::scalar] = std::make_unique<DynamicTrait>(
-      "Scalar", [](DataType dt) { return is_real(dt) || is_integral(dt); });
+  traits_[StaticTraitID::real] = std::make_unique<DynamicTrait>("Real", is_real);
+  traits_[StaticTraitID::integral] = std::make_unique<DynamicTrait>("Integral", is_integral);
+  traits_[StaticTraitID::primitive] =
+      std::make_unique<DynamicTrait>("Primitive", [](DataType dt) { return dt->is<PrimitiveType>(); });
+  traits_[StaticTraitID::scalar] =
+      std::make_unique<DynamicTrait>("Scalar", [](DataType dt) { return is_real(dt) || is_integral(dt); });
 }
 
 class InternalCallOperation : public Operation {
@@ -253,25 +242,17 @@ class InternalCallOperation : public Operation {
                         const std::vector<DataType> &params,
                         DataType result,
                         bool with_runtime_context)
-      : Operation(internal_name,
-                  Signature(type_exprs_from_dts(params), !result)),
+      : Operation(internal_name, Signature(type_exprs_from_dts(params), !result)),
         internal_call_name_(internal_name),
         with_runtime_context_(with_runtime_context) {
   }
-  InternalCallOperation(const std::string &internal_name,
-                        Signature sig,
-                        bool with_runtime_context)
-      : Operation(internal_name, sig),
-        internal_call_name_(internal_name),
-        with_runtime_context_(with_runtime_context) {
+  InternalCallOperation(const std::string &internal_name, Signature sig, bool with_runtime_context)
+      : Operation(internal_name, sig), internal_call_name_(internal_name), with_runtime_context_(with_runtime_context) {
   }
 
-  Stmt *flatten(Expression::FlattenContext *ctx,
-                const std::vector<Expr> &args,
-                DataType ret_type) const override {
+  Stmt *flatten(Expression::FlattenContext *ctx, const std::vector<Expr> &args, DataType ret_type) const override {
     auto rargs = get_all_rvalues(args, ctx);
-    return ctx->push_back<InternalFuncStmt>(
-        internal_call_name_, rargs, (Type *)ret_type, with_runtime_context_);
+    return ctx->push_back<InternalFuncStmt>(internal_call_name_, rargs, (Type *)ret_type, with_runtime_context_);
   }
 };
 
@@ -283,28 +264,25 @@ Operation *Operations::get(InternalOp opcode) {
 }
 
 void Operations::init_internals() {
-#define PLAIN_OP(name, ret, ctx, ...)                                     \
-  internals_[InternalOp::name] = std::make_unique<InternalCallOperation>( \
-      #name, std::vector<DataType>{__VA_ARGS__}, ret, ctx)
-#define POLY_OP(name, ctx, sig)  \
-  internals_[InternalOp::name] = \
-      std::make_unique<InternalCallOperation>(#name, sig, ctx)
+#define PLAIN_OP(name, ret, ctx, ...) \
+  internals_[InternalOp::name] =      \
+      std::make_unique<InternalCallOperation>(#name, std::vector<DataType>{__VA_ARGS__}, ret, ctx)
+#define POLY_OP(name, ctx, sig) internals_[InternalOp::name] = std::make_unique<InternalCallOperation>(#name, sig, ctx)
 
-#define COMPOSITE_EXTRACT(n) \
-  PLAIN_OP(composite_extract_##n, f32, false, f32_ptr);
+#define COMPOSITE_EXTRACT(n) PLAIN_OP(composite_extract_##n, f32, false, f32_ptr);
   COMPOSITE_EXTRACT(0);
   COMPOSITE_EXTRACT(1);
   COMPOSITE_EXTRACT(2);
   COMPOSITE_EXTRACT(3);
 #undef COMPOSITE_EXTRACT
 
-#define INSERT_TRIPLET(dt) \
-  PLAIN_OP(insert_triplet_##dt, i32_void, true, u64, i32, i32, dt);
+#define INSERT_TRIPLET(dt) PLAIN_OP(insert_triplet_##dt, i32_void, true, u64, i32, i32, dt);
   INSERT_TRIPLET(f32);
   INSERT_TRIPLET(f64);
 #undef INSERT_TRIPLET
 
   PLAIN_OP(linear_thread_idx, i32, true);
+  PLAIN_OP(block_thread_idx, i32, false);
   PLAIN_OP(test_stack, i32_void, true);
   PLAIN_OP(test_active_mask, i32_void, true);
   PLAIN_OP(test_shfl, i32_void, true);
@@ -316,17 +294,14 @@ void Operations::init_internals() {
   PLAIN_OP(test_internal_func_args, i32, true, f32, f32, i32);
 
   // CUDA ops:
-  // block_barrier, grid_memfence, cuda_all_sync, cuda_any_sync, cuda_uni_sync,
+  // block_barrier, grid_mem_fence, cuda_all_sync, cuda_any_sync, cuda_uni_sync,
   // cuda_ballot, cuda_shfl_sync, cuda_shfl_up_sync, cuda_shfl_down_sync,
   // cuda_shfl_xor_sync, cuda_match_any_sync, cuda_match_all_sync,
   // cuda_active_mask, warp_barrier, cuda_clock_i64
 
-#define CUDA_VOTE_SYNC(name) \
-  PLAIN_OP(cuda_##name##_sync_i32, i32, false, u32, i32)
-#define CUDA_SHFL_SYNC(name, dt) \
-  PLAIN_OP(cuda_##name##_sync_##dt, dt, false, u32, dt, i32, i32)
-#define CUDA_MATCH_SYNC(name, dt) \
-  PLAIN_OP(cuda_match_##name##_sync_##dt, u32, false, u32, dt)
+#define CUDA_VOTE_SYNC(name) PLAIN_OP(cuda_##name##_sync_i32, i32, false, u32, i32)
+#define CUDA_SHFL_SYNC(name, dt) PLAIN_OP(cuda_##name##_sync_##dt, dt, false, u32, dt, i32, i32)
+#define CUDA_MATCH_SYNC(name, dt) PLAIN_OP(cuda_match_##name##_sync_##dt, u32, false, u32, dt)
 
   // Clock intrinsics (per-backend)
   PLAIN_OP(cuda_clock_i64, i64, false);
@@ -338,7 +313,8 @@ void Operations::init_internals() {
   PLAIN_OP(block_barrier_and_i32, i32, false, i32);
   PLAIN_OP(block_barrier_or_i32, i32, false, i32);
   PLAIN_OP(block_barrier_count_i32, i32, false, i32);
-  PLAIN_OP(grid_memfence, i32_void, false);
+  PLAIN_OP(block_mem_fence, i32_void, false);
+  PLAIN_OP(grid_mem_fence, i32_void, false);
   CUDA_VOTE_SYNC(all);
   CUDA_VOTE_SYNC(any);
   CUDA_VOTE_SYNC(uni);
@@ -355,6 +331,10 @@ void Operations::init_internals() {
   CUDA_MATCH_SYNC(all, i32);
   PLAIN_OP(cuda_active_mask, u32, false);
   PLAIN_OP(warp_barrier, i32_void, false, u32);
+  // (mask: u32, base: u32, offset: i32) -> u32. CUDA fast path for qd.math.fns: lowered to a single PTX `fns.b32`
+  // instruction via inline asm in codegen_cuda.cpp (`__nv_fns` is *not* in the slim libdevice.10.bc we ship). Only
+  // valid on the CUDA backend; the portable Python @qd.func fallback in qd.math.fns dispatches to this on CUDA only.
+  PLAIN_OP(cuda_fns_u32, u32, false, u32, u32, i32);
 
 #undef CUDA_MATCH_SYNC
 #undef CUDA_SHFL_SYNC
@@ -363,39 +343,37 @@ void Operations::init_internals() {
   // Vulkan ops:
   // workgroupBarrier, workgroupMemoryBarrier, localInvocationId,
   // vkGlobalThreadIdx, subgroupBarrier, subgroupMemoryBarrier, subgroupElect,
-  // subgroupBroadcast, subgroupSize, subgroupInvocationId, subgroupAdd,
-  // subgroupMul, subgroupMin, subgroupMax, subgroupAnd, subgroupOr,
-  // subgroupXor, subgroupInclusiveAdd, subgroupInclusiveMul,
-  // subgroupInclusiveMin, subgroupInclusiveMax, subgroupInclusiveAnd,
-  // subgroupInclusiveOr, subgroupInclusiveXor
+  // subgroupBroadcast, subgroupInvocationId,
+  // (subgroupSize is intentionally absent: ``qd.simt.subgroup.group_size()`` resolves to a Python ``int`` at compile
+  // time via ``Program::subgroup_size()`` and is folded into the IR as a literal on every backend; see
+  // ``inc/internal_ops.inc.h``.)
+  // (subgroupInclusive{Add,Mul,Min,Max,And,Or,Xor}: portable ``@qd.func`` Hillis-Steele scans over
+  // `subgroupShuffleUp`; no internal ops needed.)
 
   auto ValueT = tyvar("ValueT");
 
   PLAIN_OP(workgroupBarrier, i32_void, false);
   PLAIN_OP(workgroupMemoryBarrier, i32_void, false);
+  PLAIN_OP(gridMemoryBarrier, i32_void, false);
   PLAIN_OP(localInvocationId, i32, false);
+  PLAIN_OP(globalInvocationId, i32, false);
   PLAIN_OP(vkGlobalThreadIdx, i32, false);
   PLAIN_OP(subgroupBarrier, i32_void, false);
   PLAIN_OP(subgroupMemoryBarrier, i32_void, false);
   PLAIN_OP(subgroupElect, i32, false);
   POLY_OP(subgroupBroadcast, false, Signature({}, {ValueT, !u32}, ValueT));
-  PLAIN_OP(subgroupSize, i32, false);
+  POLY_OP(subgroupShuffle, false, Signature({}, {ValueT, !u32}, ValueT));
+  POLY_OP(subgroupShuffleDown, false, Signature({}, {ValueT, !u32}, ValueT));
+  POLY_OP(subgroupShuffleUp, false, Signature({}, {ValueT, !u32}, ValueT));
+  PLAIN_OP(subgroupBallotU32, u32, false, i32);
+  PLAIN_OP(subgroupBallotU64, u64, false, i32);
+  // ``subgroupSize`` is no longer an internal op; ``qd.simt.subgroup.group_size()`` resolves at compile time via
+  // ``Program::subgroup_size()`` and folds into the IR as a literal on every backend.
   PLAIN_OP(subgroupInvocationId, i32, false);
-  POLY_OP(subgroupAdd, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupMul, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupMin, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupMax, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupAnd, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupOr, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupXor, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupInclusiveAdd, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupInclusiveMul, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupInclusiveMin, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupInclusiveMax, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupInclusiveAnd, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupInclusiveOr, false, Signature({}, {ValueT}, ValueT));
-  POLY_OP(subgroupInclusiveXor, false, Signature({}, {ValueT}, ValueT));
-
+  // subgroupAdd / subgroupMul / subgroupMin / subgroupMax / subgroupAnd / subgroupOr / subgroupXor
+  // are intentionally absent: the portable `subgroup.reduce_add_tiled(value, log2_size)` (and equivalents)
+  // are implemented in Python on top of `subgroupShuffleDown` / `subgroupShuffle` and are the
+  // supported APIs on all backends.
 #undef POLY_OP
 #undef PLAIN_OP
 }

@@ -40,13 +40,12 @@
     return opname(lhs, rhs);                                               \
   }
 
-#define DEFINE_EXPRESSION_FUNC_TERNARY(opname)                               \
-  Expr expr_##opname(const Expr &cond, const Expr &lhs, const Expr &rhs) {   \
-    return Expr::make<TernaryOpExpression>(TernaryOpType::opname, cond, lhs, \
-                                           rhs);                             \
-  }                                                                          \
-  Expr opname(const Expr &cond, const Expr &lhs, const Expr &rhs) {          \
-    return expr_##opname(cond, lhs, rhs);                                    \
+#define DEFINE_EXPRESSION_FUNC_TERNARY(opname)                                     \
+  Expr expr_##opname(const Expr &cond, const Expr &lhs, const Expr &rhs) {         \
+    return Expr::make<TernaryOpExpression>(TernaryOpType::opname, cond, lhs, rhs); \
+  }                                                                                \
+  Expr opname(const Expr &cond, const Expr &lhs, const Expr &rhs) {                \
+    return expr_##opname(cond, lhs, rhs);                                          \
   }
 
 #else
@@ -94,6 +93,7 @@ DEFINE_EXPRESSION_FUNC_UNARY(exp)
 DEFINE_EXPRESSION_FUNC_UNARY(log)
 DEFINE_EXPRESSION_FUNC_UNARY(popcnt)
 DEFINE_EXPRESSION_FUNC_UNARY(clz)
+DEFINE_EXPRESSION_FUNC_UNARY(ffs)
 DEFINE_EXPRESSION_FUNC_UNARY(logic_not)
 DEFINE_EXPRESSION_OP_UNARY(~, bit_not)
 DEFINE_EXPRESSION_OP_UNARY(-, neg)

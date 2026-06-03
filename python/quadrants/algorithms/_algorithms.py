@@ -4,6 +4,7 @@ from quadrants._kernels import (
     blit_from_field_to_field,
     scan_add_inclusive,
     sort_stage,
+    subgroup_inclusive_add_warp_i32,
     uniform_add,
     warp_shfl_up_i32,
 )
@@ -81,9 +82,24 @@ class PrefixSumExecutor:
             raise RuntimeError("Only qd.i32 type is supported for prefix sum.")
 
         if current_cfg().arch == cuda:
-            inclusive_add = warp_shfl_up_i32
+            scan_primitive = warp_shfl_up_i32
         elif current_cfg().arch == vulkan:
-            inclusive_add = subgroup.inclusive_add
+            # `subgroup.inclusive_add_tiled` takes `(value, log2_size)`; the prefix-sum kernel passes the primitive
+            # as a template callable invoked with a single argument, so use the adapter that pre-binds
+            # `log2_size=5` (full 32-lane warp/wave scan).  The kernel itself hard-codes `WARP_SZ=32` for the
+            # inter-warp accumulation and the shared-memory layout, so the device subgroup width *must* be exactly
+            # 32 for the result to be correct.  Vulkan reports the subgroup width per physical device
+            # (`VkPhysicalDeviceSubgroupProperties::subgroupSize`) -- 32 on NVIDIA, MoltenVK, and most desktop
+            # drivers, but 16 on some Intel iGPUs and 64 on AMDGPU Vulkan in wave64 mode.  Fail loudly here rather
+            # than silently producing wrong results.
+            actual = subgroup.group_size()
+            if actual != 32:
+                raise RuntimeError(
+                    f"PrefixSumExecutor on Vulkan requires subgroup size == 32 (got {actual}). "
+                    f"The kernel hard-codes a 32-wide warp scan; running on a {actual}-wide subgroup would "
+                    f"silently compute the wrong result."
+                )
+            scan_primitive = subgroup_inclusive_add_warp_i32
         else:
             raise RuntimeError(f"{str(current_cfg().arch)} is not supported for prefix sum.")
 
@@ -97,7 +113,7 @@ class PrefixSumExecutor:
                     ele_nums_pos[i],
                     ele_nums_pos[i + 1],
                     True,
-                    inclusive_add,
+                    scan_primitive,
                 )
             else:
                 scan_add_inclusive(
@@ -105,7 +121,7 @@ class PrefixSumExecutor:
                     ele_nums_pos[i],
                     ele_nums_pos[i + 1],
                     False,
-                    inclusive_add,
+                    scan_primitive,
                 )
 
         for i in range(len(ele_nums) - 3, -1, -1):
