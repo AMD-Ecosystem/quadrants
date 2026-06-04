@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cstdlib>
 #include <map>
 
 #include "quadrants/runtime/amdgpu/kernel_launcher.h"
@@ -13,6 +15,25 @@ namespace quadrants::lang {
 namespace amdgpu {
 
 namespace {
+
+// QD_AMDGPU_KERNARG_BYVAL=1 re-enables the fork's by-value-in-kernarg RuntimeContext ABI. Instead of staging the
+// RuntimeContext into a device buffer and passing an 8-byte device pointer in kernarg (upstream pointer ABI, which
+// pays one memcpy_host_to_device_async(sizeof(RuntimeContext)) per kernel-group launch), the whole struct is packed
+// directly into the HIP kernarg buffer (arg_size == sizeof(RuntimeContext)), eliminating that per-launch H2D. MUST
+// agree with kernel_argument_struct_in_kernarg() in codegen/amdgpu/codegen_amdgpu.cpp (same env var). Read once.
+//
+// Scope: prototype for the forward-only RL physics workload. The by-value path leaves context_pointer null, so it is
+// incompatible with adstack/reverse-mode tasks that dispatch sizer/reducer kernels needing a device-side context
+// pointer; the launcher keeps a device-staged context for any launch containing such tasks (see
+// needs_device_context), so AD remains correct. Default ON for AMDGPU; set QD_AMDGPU_KERNARG_BYVAL=0 to restore the
+// upstream pointer ABI.
+bool kernarg_byval_enabled() {
+  static const bool enabled = []() {
+    const char *flag = std::getenv("QD_AMDGPU_KERNARG_BYVAL");
+    return flag == nullptr || flag[0] != '0';  // default ON; QD_AMDGPU_KERNARG_BYVAL=0 -> upstream pointer ABI
+  }();
+  return enabled;
+}
 
 // Match the SPIR-V `advisory_total_num_threads = 65536` cap for adstack-bearing kernels so the heap footprint scales
 // with `kAdStackMaxConcurrentThreads * stride` instead of `saturating_grid_dim * block_dim * stride`. See the matching
@@ -61,6 +82,10 @@ void KernelLauncher::launch_offloaded_tasks(LaunchContextBuilder &ctx,
                                             void *context_pointer,
                                             int arg_size) {
   auto *executor = get_runtime_executor();
+  // Kernarg source: by-value packs the RuntimeContext struct itself (arg_size == sizeof(RuntimeContext)); the pointer
+  // ABI packs the 8-byte device pointer held in `context_pointer`. See kernarg_byval_enabled().
+  void *kernarg_src =
+      kernarg_byval_enabled() ? static_cast<void *>(&ctx.get_context()) : static_cast<void *>(&context_pointer);
   // Two gates govern the per-launch adstack publish work, both opt-in by the kernel's IR shape. Forward-only kernels
   // skip both gates and pay zero adstack overhead; reverse-mode kernels without a captured `bound_expr` skip the
   // lazy-claim block, paying the per-task `publish_adstack_metadata` only. See the matching comment in
@@ -144,7 +169,7 @@ void KernelLauncher::launch_offloaded_tasks(LaunchContextBuilder &ctx,
       int effective_grid_dim = prepare_task(i, task);
       QD_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, effective_grid_dim, task.block_dim);
       amdgpu_module->launch(task.name, effective_grid_dim, task.block_dim, task.dynamic_shared_array_bytes,
-                            {(void *)&context_pointer}, {arg_size});
+                            {kernarg_src}, {arg_size});
       i++;
     } else {
       size_t group_start = i;
@@ -183,7 +208,7 @@ void KernelLauncher::launch_offloaded_tasks(LaunchContextBuilder &ctx,
           AMDGPUContext::get_instance().set_stream(stream_by_id[t.stream_parallel_group_id]);
           QD_TRACE("Launching kernel {}<<<{}, {}>>>", t.name, grid_dims[j - group_start], t.block_dim);
           amdgpu_module->launch(t.name, grid_dims[j - group_start], t.block_dim, t.dynamic_shared_array_bytes,
-                                {(void *)&context_pointer}, {arg_size});
+                                {kernarg_src}, {arg_size});
         }
 
         // Join: record an event on each pool stream and make the default stream wait, so subsequent serial work on
@@ -404,20 +429,36 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
                                                              ctx.arg_buffer_size, active_stream);
     ctx.get_context().arg_buffer = device_arg_buffer;
   }
-  int arg_size = sizeof(RuntimeContext *);
+  // By-value kernarg ABI (QD_AMDGPU_KERNARG_BYVAL=1): skip the RuntimeContext device staging buffer entirely and the
+  // per-launch H2D copy; the struct (with arg_buffer/result_buffer already patched to device pointers above) is packed
+  // straight into kernarg by launch_offloaded_tasks. Pointer ABI (default): stage + pass an 8-byte device pointer.
+  const bool byval_kernarg = kernarg_byval_enabled();
+  // Even in by-value mode, adstack/reverse-mode tasks dispatch sizer/reducer helper kernels that take the
+  // RuntimeContext as a *device* pointer; keep a valid device-staged context for those launches. Forward-only
+  // kernels (the hot RL path) have no such tasks and skip the staging buffer + the per-launch H2D entirely.
+  const bool needs_device_context =
+      !byval_kernarg ||
+      std::any_of(offloaded_tasks.begin(), offloaded_tasks.end(), [](const OffloadedTask &t) {
+        return !t.ad_stack.allocas.empty() || t.ad_stack.bound_expr.has_value() ||
+               !t.ad_stack.max_reducer_specs.empty();
+      });
+  int arg_size = byval_kernarg ? static_cast<int>(sizeof(RuntimeContext)) : static_cast<int>(sizeof(RuntimeContext *));
   void *ephemeral_context_ptr = nullptr;
   void *context_pointer = nullptr;
-  if (use_persistent_scratch) {
-    if (launcher_ctx.runtime_context_dev_ptr == nullptr) {
-      AMDGPUDriver::get_instance().malloc_async(&launcher_ctx.runtime_context_dev_ptr, sizeof(RuntimeContext), nullptr);
+  if (needs_device_context) {
+    if (use_persistent_scratch) {
+      if (launcher_ctx.runtime_context_dev_ptr == nullptr) {
+        AMDGPUDriver::get_instance().malloc_async(&launcher_ctx.runtime_context_dev_ptr, sizeof(RuntimeContext),
+                                                  nullptr);
+      }
+      context_pointer = launcher_ctx.runtime_context_dev_ptr;
+    } else {
+      AMDGPUDriver::get_instance().malloc_async(&ephemeral_context_ptr, sizeof(RuntimeContext), active_stream);
+      context_pointer = ephemeral_context_ptr;
     }
-    context_pointer = launcher_ctx.runtime_context_dev_ptr;
-  } else {
-    AMDGPUDriver::get_instance().malloc_async(&ephemeral_context_ptr, sizeof(RuntimeContext), active_stream);
-    context_pointer = ephemeral_context_ptr;
+    AMDGPUDriver::get_instance().memcpy_host_to_device_async(context_pointer, &ctx.get_context(), sizeof(RuntimeContext),
+                                                             active_stream);
   }
-  AMDGPUDriver::get_instance().memcpy_host_to_device_async(context_pointer, &ctx.get_context(), sizeof(RuntimeContext),
-                                                           active_stream);
 
   // Adstack-cache invalidation bump - see `bump_writes_for_kernel_llvm` in `program/adstack_size_expr_eval.{h,cpp}`.
   bump_writes_for_kernel_llvm(executor->get_program(), &ctx, offloaded_tasks);

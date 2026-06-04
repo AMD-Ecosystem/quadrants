@@ -3,6 +3,7 @@
 #include <vector>
 #include <set>
 #include <functional>
+#include <cstdlib>
 
 #include "quadrants/common/core.h"
 #include "quadrants/util/io.h"
@@ -363,7 +364,16 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
   // is passed without byval -- exactly what upstream does. Re-porting the by-value-in-kernarg optimization would also
   // require restoring the fork's launcher kernarg path and is left as a follow-up perf item.
   bool kernel_argument_struct_in_kernarg() const override {
-    return false;
+    // QD_AMDGPU_KERNARG_BYVAL=1 re-enables the fork's by-value-in-kernarg RuntimeContext ABI: the struct is packed
+    // directly into the kernarg segment (no device staging buffer, no per-launch H2D of the RuntimeContext). This MUST
+    // agree with the matching gate in runtime/amdgpu/kernel_launcher.cpp (same env var, read once per process) or
+    // codegen and the launcher disagree on the kernarg layout and every field past the first 8 bytes is garbage.
+    // Default (unset) keeps upstream's pointer ABI.
+    static const bool byval = []() {
+      const char *e = std::getenv("QD_AMDGPU_KERNARG_BYVAL");
+      return e == nullptr || e[0] != '0';  // default ON for AMDGPU; QD_AMDGPU_KERNARG_BYVAL=0 -> upstream pointer ABI
+    }();
+    return byval;
   }
 
   // Fork: SNode root pointers are hipMalloc'd global memory. Cast the result to addrspace(1) so subsequent
