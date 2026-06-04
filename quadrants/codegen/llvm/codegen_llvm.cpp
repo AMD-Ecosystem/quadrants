@@ -1999,8 +1999,13 @@ std::string TaskCodeGenLLVM::init_offloaded_task_function(OffloadedStmt *stmt, s
     }
   }
 
-  task_function_type =
-      llvm::FunctionType::get(llvm::Type::getVoidTy(*llvm_context), {llvm::PointerType::get(context_ty, 0)}, false);
+  // NOTE(npoulad/quadrants-0.8.0-rebase): the upstream unconditional `task_function_type` assignment that previously
+  // lived here has been removed. It clobbered the fork's conditional by-value-kernarg type set earlier in this function
+  // (the `kernel_argument_struct_in_kernarg()` block above). With both present, the AMDGPU kernel was created with a
+  // pointer parameter while the by-value alloca path (`context_val_alloca_` store of `kernel_args[0]`) still ran,
+  // storing the incoming pointer into a struct-typed stack slot. Every RuntimeContext field read then hit stack
+  // garbage, crashing each kernel launch with a null-pointer memory fault (bare Quadrants) / illegal-instruction queue
+  // abort (Genesis). The single conditional assignment above is the correct one for all backends.
 
   auto task_kernel_name =
       stmt->loop_name.empty()
