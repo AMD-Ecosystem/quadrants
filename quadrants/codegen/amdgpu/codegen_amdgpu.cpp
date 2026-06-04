@@ -345,9 +345,25 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
     return false;
   }
 
-  // Fork: AMDGPU disallows byval; pass struct directly in kernarg (see codegen_llvm.h docstring).
+  // NOTE(npoulad/quadrants-0.8.0-rebase): returns false to use upstream's pointer ABI for the RuntimeContext kernarg.
+  //
+  // The fork originally passed the RuntimeContext *by value* in kernarg (return true here) as a perf optimization:
+  // the struct lands in kernarg SGPRs so field reads avoid a pointer indirection. That required the fork's matching
+  // launcher, which set `arg_size = sizeof(RuntimeContext)` and memcpy'd the full struct into the kernarg segment.
+  //
+  // The v0.8.0 merge adopted upstream's `runtime/amdgpu/kernel_launcher.cpp` wholesale (it carries the new adstack
+  // lazy-claim + max-reducer dispatch, persistent scratch, and streams machinery we want). Upstream's launcher passes
+  // a *device pointer* to the RuntimeContext in kernarg (`arg_size = sizeof(RuntimeContext *)`). Keeping the fork's
+  // by-value codegen against that pointer-passing launcher made every kernel read sizeof(RuntimeContext) bytes from a
+  // kernarg segment that only holds an 8-byte pointer -> garbage field reads -> null-pointer memory fault (bare
+  // Quadrants) / HSA illegal-instruction abort (Genesis).
+  //
+  // Aligning to upstream's pointer ABI (false) restores a self-consistent codegen<->launcher contract. Note AMDGPU
+  // still disallows the `byval` attribute, but `kernel_argument_by_val()` is already false here so the pointer param
+  // is passed without byval -- exactly what upstream does. Re-porting the by-value-in-kernarg optimization would also
+  // require restoring the fork's launcher kernarg path and is left as a follow-up perf item.
   bool kernel_argument_struct_in_kernarg() const override {
-    return true;
+    return false;
   }
 
   // Fork: SNode root pointers are hipMalloc'd global memory. Cast the result to addrspace(1) so subsequent
