@@ -41,6 +41,7 @@
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/TargetParser/Triple.h"
 
+#include "quadrants/rhi/arch.h"
 #include "quadrants/util/lang_util.h"
 #include "quadrants/jit/jit_session.h"
 #include "quadrants/common/task.h"
@@ -50,6 +51,7 @@
 #include "quadrants/codegen/codegen_utils.h"
 
 #include "quadrants/runtime/llvm/llvm_context_pass.h"
+#include "quadrants/runtime/llvm/kernel_atomic_syncscope.h"
 
 #ifdef _WIN32
 // Travis CI seems doesn't support <filesystem>...
@@ -72,17 +74,13 @@ namespace quadrants::lang {
 
 using namespace llvm;
 
-QuadrantsLLVMContext::QuadrantsLLVMContext(const CompileConfig &config,
-                                           Arch arch)
-    : config_(config), arch_(arch) {
+QuadrantsLLVMContext::QuadrantsLLVMContext(const CompileConfig &config, Arch arch) : config_(config), arch_(arch) {
   QD_TRACE("Creating Quadrants llvm context for arch: {}", arch_name(arch));
   main_thread_id_ = std::this_thread::get_id();
   main_thread_data_ = get_this_thread_data();
   llvm::remove_fatal_error_handler();
   llvm::install_fatal_error_handler(
-      [](void *user_data, const char *reason, bool gen_crash_diag) {
-        QD_ERROR("LLVM Fatal Error: {}", reason);
-      },
+      [](void *user_data, const char *reason, bool gen_crash_diag) { QD_ERROR("LLVM Fatal Error: {}", reason); },
       nullptr);
 
   if (arch_is_cpu(arch)) {
@@ -121,10 +119,9 @@ QuadrantsLLVMContext::QuadrantsLLVMContext(const CompileConfig &config,
 
   data_layout_ = QuadrantsLLVMContext::get_data_layout(arch);
   linking_context_data = std::make_unique<ThreadLocalData>(
-      std::make_unique<llvm::orc::ThreadSafeContext>(
-          std::make_unique<llvm::LLVMContext>()));
-  linking_context_data->runtime_module = clone_module_to_context(
-      get_this_thread_runtime_module(), linking_context_data->llvm_context);
+      std::make_unique<llvm::orc::ThreadSafeContext>(std::make_unique<llvm::LLVMContext>()));
+  linking_context_data->runtime_module =
+      clone_module_to_context(get_this_thread_runtime_module(), linking_context_data->llvm_context);
 
   QD_TRACE("Quadrants llvm context created.");
 }
@@ -134,17 +131,13 @@ QuadrantsLLVMContext::~QuadrantsLLVMContext() {
 
 llvm::Type *QuadrantsLLVMContext::get_data_type(DataType dt) {
   auto ctx = get_this_thread_context();
-  if (dt->is_primitive(PrimitiveTypeID::i8) ||
-      dt->is_primitive(PrimitiveTypeID::u8)) {
+  if (dt->is_primitive(PrimitiveTypeID::i8) || dt->is_primitive(PrimitiveTypeID::u8)) {
     return llvm::Type::getInt8Ty(*ctx);
-  } else if (dt->is_primitive(PrimitiveTypeID::i16) ||
-             dt->is_primitive(PrimitiveTypeID::u16)) {
+  } else if (dt->is_primitive(PrimitiveTypeID::i16) || dt->is_primitive(PrimitiveTypeID::u16)) {
     return llvm::Type::getInt16Ty(*ctx);
-  } else if (dt->is_primitive(PrimitiveTypeID::i32) ||
-             dt->is_primitive(PrimitiveTypeID::u32)) {
+  } else if (dt->is_primitive(PrimitiveTypeID::i32) || dt->is_primitive(PrimitiveTypeID::u32)) {
     return llvm::Type::getInt32Ty(*ctx);
-  } else if (dt->is_primitive(PrimitiveTypeID::i64) ||
-             dt->is_primitive(PrimitiveTypeID::u64)) {
+  } else if (dt->is_primitive(PrimitiveTypeID::i64) || dt->is_primitive(PrimitiveTypeID::u64)) {
     return llvm::Type::getInt64Ty(*ctx);
   } else if (dt->is_primitive(PrimitiveTypeID::u1)) {
     return llvm::Type::getInt1Ty(*ctx);
@@ -171,8 +164,7 @@ llvm::Type *QuadrantsLLVMContext::get_data_type(DataType dt) {
     }
     return llvm::StructType::get(*ctx, types);
   } else if (const auto *pointer_type = dt->cast<PointerType>()) {
-    return llvm::PointerType::get(
-        get_data_type(pointer_type->get_pointee_type()), 0);
+    return llvm::PointerType::get(get_data_type(pointer_type->get_pointee_type()), 0);
   } else {
     QD_INFO(data_type_name(dt));
     QD_NOT_IMPLEMENTED;
@@ -201,9 +193,8 @@ std::string libdevice_path() {
   return fmt::format("{}/slim_libdevice.{}.bc", folder, LIBDEVICE_VERSION);
 }
 
-std::unique_ptr<llvm::Module> QuadrantsLLVMContext::clone_module_to_context(
-    llvm::Module *module,
-    llvm::LLVMContext *target_context) {
+std::unique_ptr<llvm::Module> QuadrantsLLVMContext::clone_module_to_context(llvm::Module *module,
+                                                                            llvm::LLVMContext *target_context) {
   // Dump a module from one context to bitcode and then parse the bitcode in a
   // different context
   std::string bitcode;
@@ -215,8 +206,7 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::clone_module_to_context(
     llvm::WriteBitcodeToFile(*module, sos);
   }
 
-  auto cloned = parseBitcodeFile(
-      llvm::MemoryBufferRef(bitcode, "runtime_bitcode"), *target_context);
+  auto cloned = parseBitcodeFile(llvm::MemoryBufferRef(bitcode, "runtime_bitcode"), *target_context);
   if (!cloned) {
     auto error = cloned.takeError();
     QD_ERROR("Bitcode cloned failed.");
@@ -224,24 +214,19 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::clone_module_to_context(
   return std::move(cloned.get());
 }
 
-std::unique_ptr<llvm::Module>
-QuadrantsLLVMContext::clone_module_to_this_thread_context(
-    llvm::Module *module) {
+std::unique_ptr<llvm::Module> QuadrantsLLVMContext::clone_module_to_this_thread_context(llvm::Module *module) {
   QD_TRACE("Cloning struct module");
   QD_ASSERT(module);
   auto this_context = get_this_thread_context();
   return clone_module_to_context(module, this_context);
 }
 
-std::unique_ptr<llvm::Module> LlvmModuleBitcodeLoader::load(
-    llvm::LLVMContext *ctx) const {
+std::unique_ptr<llvm::Module> LlvmModuleBitcodeLoader::load(llvm::LLVMContext *ctx) const {
   QD_AUTO_PROF;
   std::ifstream ifs(bitcode_path_, std::ios::binary);
   QD_ERROR_IF(!ifs, "Bitcode file ({}) not found.", bitcode_path_);
-  std::string bitcode(std::istreambuf_iterator<char>(ifs),
-                      (std::istreambuf_iterator<char>()));
-  auto runtime =
-      parseBitcodeFile(llvm::MemoryBufferRef(bitcode, buffer_id_), *ctx);
+  std::string bitcode(std::istreambuf_iterator<char>(ifs), (std::istreambuf_iterator<char>()));
+  auto runtime = parseBitcodeFile(llvm::MemoryBufferRef(bitcode, buffer_id_), *ctx);
   if (!runtime) {
     auto error = runtime.takeError();
     QD_WARN("Bitcode loading error message:");
@@ -264,14 +249,9 @@ std::unique_ptr<llvm::Module> LlvmModuleBitcodeLoader::load(
   return std::move(runtime.get());
 }
 
-std::unique_ptr<llvm::Module> module_from_bitcode_file(
-    const std::string &bitcode_path,
-    llvm::LLVMContext *ctx) {
+std::unique_ptr<llvm::Module> module_from_bitcode_file(const std::string &bitcode_path, llvm::LLVMContext *ctx) {
   LlvmModuleBitcodeLoader loader;
-  return loader.set_bitcode_path(bitcode_path)
-      .set_buffer_id("runtime_bitcode")
-      .set_inline_funcs(true)
-      .load(ctx);
+  return loader.set_bitcode_path(bitcode_path).set_buffer_id("runtime_bitcode").set_inline_funcs(true).load(ctx);
 }
 
 // The goal of this function is to rip off huge libdevice functions that are not
@@ -280,41 +260,11 @@ std::unique_ptr<llvm::Module> module_from_bitcode_file(
 // want these functions to waste clock cycles during module cloning and linking.
 static void remove_useless_cuda_libdevice_functions(llvm::Module *module) {
   std::vector<std::string> function_name_list = {
-      "rnorm3df",
-      "norm4df",
-      "rnorm4df",
-      "normf",
-      "rnormf",
-      "j0f",
-      "j1f",
-      "y0f",
-      "y1f",
-      "ynf",
-      "jnf",
-      "cyl_bessel_i0f",
-      "cyl_bessel_i1f",
-      "j0",
-      "j1",
-      "y0",
-      "y1",
-      "yn",
-      "jn",
-      "cyl_bessel_i0",
-      "cyl_bessel_i1",
-      "tgammaf",
-      "lgammaf",
-      "tgamma",
-      "lgamma",
-      "erff",
-      "erfinvf",
-      "erfcf",
-      "erfcxf",
-      "erfcinvf",
-      "erf",
-      "erfinv",
-      "erfcx",
-      "erfcinv",
-      "erfc",
+      "rnorm3df", "norm4df", "rnorm4df", "normf",          "rnormf",         "j0f",      "j1f",     "y0f",
+      "y1f",      "ynf",     "jnf",      "cyl_bessel_i0f", "cyl_bessel_i1f", "j0",       "j1",      "y0",
+      "y1",       "yn",      "jn",       "cyl_bessel_i0",  "cyl_bessel_i1",  "tgammaf",  "lgammaf", "tgamma",
+      "lgamma",   "erff",    "erfinvf",  "erfcf",          "erfcxf",         "erfcinvf", "erf",     "erfinv",
+      "erfcx",    "erfcinv", "erfc",
   };
   for (auto fn : function_name_list) {
     module->getFunction("__nv_" + fn)->eraseFromParent();
@@ -339,21 +289,17 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::clone_runtime_module() {
   return cloned;
 }
 
-std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
-    const std::string &file) {
+std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(const std::string &file) {
   auto ctx = get_this_thread_context();
-  std::unique_ptr<llvm::Module> module = module_from_bitcode_file(
-      fmt::format("{}/{}", runtime_lib_dir(), file), ctx);
+  std::unique_ptr<llvm::Module> module = module_from_bitcode_file(fmt::format("{}/{}", runtime_lib_dir(), file), ctx);
   if (arch_ == Arch::cuda || arch_ == Arch::amdgpu) {
     // Replace stub functions in the runtime bitcode with inline wrappers
     // around LLVM intrinsics. The runtime module is compiled from C++ with
     // placeholder functions (e.g. thread_idx(), block_dim()) that can't map
     // to GPU intrinsics in C++. This rewires them at IR level and marks them
     // always_inline so they disappear after inlining.
-    auto patch_intrinsic = [&](std::string name, Intrinsic::ID intrin,
-                               bool ret = true,
-                               std::vector<llvm::Type *> types = {},
-                               std::vector<llvm::Value *> extra_args = {}) {
+    auto patch_intrinsic = [&](std::string name, Intrinsic::ID intrin, bool ret = true,
+                               std::vector<llvm::Type *> types = {}, std::vector<llvm::Value *> extra_args = {}) {
       auto func = module->getFunction(name);
       if (!func) {
         return;
@@ -375,8 +321,12 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
       QuadrantsLLVMContext::mark_inline(func);
     };
 
-    auto patch_atomic_add = [&](std::string name,
-                                llvm::AtomicRMWInst::BinOp op) {
+    // The runtime bitcode ships with C++ CAS-loop bodies for these (see `runtime_module/atomic.h`); we replace them
+    // with single `atomicrmw` instructions here so the GPU backend can lower them to native hardware atomics. The
+    // syncscope must match the JIT-time codegen path in `codegen_llvm.cpp`, otherwise on AMDGPU the backend falls back
+    // to a `flat_atomic_cmpswap` retry loop and reduction / float-atomic tests livelock or run pathologically slowly.
+    // See `kernel_atomic_syncscope.h` for the full rationale.
+    auto patch_atomic_rmw = [&](std::string name, llvm::AtomicRMWInst::BinOp op) {
       auto func = module->getFunction(name);
       if (!func) {
         return;
@@ -388,16 +338,20 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
       std::vector<llvm::Value *> args;
       for (auto &arg : func->args())
         args.push_back(&arg);
-      builder.CreateRet(builder.CreateAtomicRMW(
-          op, args[0], args[1], llvm::MaybeAlign(0),
-          llvm::AtomicOrdering::SequentiallyConsistent));
+      builder.CreateRet(builder.CreateAtomicRMW(op, args[0], args[1], llvm::MaybeAlign(0),
+                                                llvm::AtomicOrdering::SequentiallyConsistent,
+                                                kernel_atomic_syncscope(ctx, arch_)));
       QuadrantsLLVMContext::mark_inline(func);
     };
 
-    patch_atomic_add("atomic_add_i32", llvm::AtomicRMWInst::Add);
-    patch_atomic_add("atomic_add_i64", llvm::AtomicRMWInst::Add);
-    patch_atomic_add("atomic_add_f64", llvm::AtomicRMWInst::FAdd);
-    patch_atomic_add("atomic_add_f32", llvm::AtomicRMWInst::FAdd);
+    patch_atomic_rmw("atomic_add_i32", llvm::AtomicRMWInst::Add);
+    patch_atomic_rmw("atomic_add_i64", llvm::AtomicRMWInst::Add);
+    patch_atomic_rmw("atomic_add_f64", llvm::AtomicRMWInst::FAdd);
+    patch_atomic_rmw("atomic_add_f32", llvm::AtomicRMWInst::FAdd);
+    patch_atomic_rmw("atomic_min_f32", llvm::AtomicRMWInst::FMin);
+    patch_atomic_rmw("atomic_max_f32", llvm::AtomicRMWInst::FMax);
+    patch_atomic_rmw("atomic_min_f64", llvm::AtomicRMWInst::FMin);
+    patch_atomic_rmw("atomic_max_f64", llvm::AtomicRMWInst::FMax);
 
     if (arch_ == Arch::cuda) {
       module->setTargetTriple(llvm::Triple("nvptx64-nvidia-cuda"));
@@ -411,26 +365,23 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
         auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
         IRBuilder<> builder(*ctx);
         builder.SetInsertPoint(bb);
-        builder.CreateRet(
-            get_constant(CUDAContext::get_instance().get_compute_capability()));
+        builder.CreateRet(get_constant(CUDAContext::get_instance().get_compute_capability()));
         QuadrantsLLVMContext::mark_inline(func);
       }
 #endif
 
       patch_intrinsic("thread_idx", Intrinsic::nvvm_read_ptx_sreg_tid_x);
+      patch_intrinsic("block_thread_idx", Intrinsic::nvvm_read_ptx_sreg_tid_x);
       patch_intrinsic("cuda_clock_i64", Intrinsic::nvvm_read_ptx_sreg_clock64);
       patch_intrinsic("block_idx", Intrinsic::nvvm_read_ptx_sreg_ctaid_x);
       patch_intrinsic("block_dim", Intrinsic::nvvm_read_ptx_sreg_ntid_x);
       patch_intrinsic("grid_dim", Intrinsic::nvvm_read_ptx_sreg_nctaid_x);
-      patch_intrinsic("block_barrier",
-                      Intrinsic::nvvm_barrier_cta_sync_aligned_all, false, {},
-                      {get_constant(0)});
+      patch_intrinsic("block_barrier", Intrinsic::nvvm_barrier_cta_sync_aligned_all, false, {}, {get_constant(0)});
 
       // barrier0_and/or/popc were replaced with barrier_cta_red variants that
       // take (i32 barrier_id, i1 pred) instead of (i32 pred) and return
       // i1 (and/or) or i32 (popc) instead of i32.
-      auto patch_barrier_red = [&](std::string name, Intrinsic::ID intrin,
-                                   bool result_is_i1) {
+      auto patch_barrier_red = [&](std::string name, Intrinsic::ID intrin, bool result_is_i1) {
         auto func = module->getFunction(name);
         if (!func)
           return;
@@ -441,25 +392,20 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
         auto *arg = &*func->arg_begin();
         auto *pred = builder.CreateTrunc(arg, builder.getInt1Ty());
         llvm::Value *barrier_args[] = {get_constant(0), pred};
-        auto *result = builder.CreateIntrinsic(intrin, ArrayRef<llvm::Type *>{},
-                                               barrier_args);
+        auto *result = builder.CreateIntrinsic(intrin, ArrayRef<llvm::Type *>{}, barrier_args);
         if (result_is_i1)
           builder.CreateRet(builder.CreateZExt(result, builder.getInt32Ty()));
         else
           builder.CreateRet(result);
         QuadrantsLLVMContext::mark_inline(func);
       };
-      patch_barrier_red("block_barrier_and_i32",
-                        Intrinsic::nvvm_barrier_cta_red_and_aligned_all, true);
-      patch_barrier_red("block_barrier_or_i32",
-                        Intrinsic::nvvm_barrier_cta_red_or_aligned_all, true);
-      patch_barrier_red("block_barrier_count_i32",
-                        Intrinsic::nvvm_barrier_cta_red_popc_aligned_all,
-                        false);
+      patch_barrier_red("block_barrier_and_i32", Intrinsic::nvvm_barrier_cta_red_and_aligned_all, true);
+      patch_barrier_red("block_barrier_or_i32", Intrinsic::nvvm_barrier_cta_red_or_aligned_all, true);
+      patch_barrier_red("block_barrier_count_i32", Intrinsic::nvvm_barrier_cta_red_popc_aligned_all, false);
       patch_intrinsic("warp_barrier", Intrinsic::nvvm_bar_warp_sync, false);
-      patch_intrinsic("block_memfence", Intrinsic::nvvm_membar_cta, false);
-      patch_intrinsic("grid_memfence", Intrinsic::nvvm_membar_gl, false);
-      patch_intrinsic("system_memfence", Intrinsic::nvvm_membar_sys, false);
+      patch_intrinsic("block_mem_fence", Intrinsic::nvvm_membar_cta, false);
+      patch_intrinsic("grid_mem_fence", Intrinsic::nvvm_membar_gl, false);
+      patch_intrinsic("system_mem_fence", Intrinsic::nvvm_membar_sys, false);
 
       patch_intrinsic("cuda_all", Intrinsic::nvvm_vote_all);
       patch_intrinsic("cuda_all_sync", Intrinsic::nvvm_vote_all_sync);
@@ -473,54 +419,54 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
       patch_intrinsic("cuda_ballot", Intrinsic::nvvm_vote_ballot);
       patch_intrinsic("cuda_ballot_sync", Intrinsic::nvvm_vote_ballot_sync);
 
-      patch_intrinsic("cuda_shfl_down_sync_i32",
-                      Intrinsic::nvvm_shfl_sync_down_i32);
-      patch_intrinsic("cuda_shfl_down_sync_f32",
-                      Intrinsic::nvvm_shfl_sync_down_f32);
+      patch_intrinsic("cuda_shfl_down_sync_i32", Intrinsic::nvvm_shfl_sync_down_i32);
+      patch_intrinsic("cuda_shfl_down_sync_f32", Intrinsic::nvvm_shfl_sync_down_f32);
 
-      patch_intrinsic("cuda_shfl_up_sync_i32",
-                      Intrinsic::nvvm_shfl_sync_up_i32);
-      patch_intrinsic("cuda_shfl_up_sync_f32",
-                      Intrinsic::nvvm_shfl_sync_up_f32);
+      patch_intrinsic("cuda_shfl_up_sync_i32", Intrinsic::nvvm_shfl_sync_up_i32);
+      patch_intrinsic("cuda_shfl_up_sync_f32", Intrinsic::nvvm_shfl_sync_up_f32);
 
       patch_intrinsic("cuda_shfl_sync_i32", Intrinsic::nvvm_shfl_sync_idx_i32);
 
       patch_intrinsic("cuda_shfl_sync_f32", Intrinsic::nvvm_shfl_sync_idx_f32);
 
-      patch_intrinsic("cuda_shfl_xor_sync_i32",
-                      Intrinsic::nvvm_shfl_sync_bfly_i32);
+      patch_intrinsic("cuda_shfl_xor_sync_i32", Intrinsic::nvvm_shfl_sync_bfly_i32);
 
-      patch_intrinsic("cuda_shfl_xor_sync_f32",
-                      Intrinsic::nvvm_shfl_sync_bfly_f32);
+      patch_intrinsic("cuda_shfl_xor_sync_f32", Intrinsic::nvvm_shfl_sync_bfly_f32);
 
-      patch_intrinsic("cuda_match_any_sync_i32",
-                      Intrinsic::nvvm_match_any_sync_i32);
+      patch_intrinsic("cuda_match_any_sync_i32", Intrinsic::nvvm_match_any_sync_i32);
 
-      // LLVM 10.0.0 seems to have a bug on this intrinsic function
-      /*
-      nvvm_match_all_sync_i32
-      Args:
-          1. u32 mask
-          2. i32 value
-          3. i32 *pred
-      */
-      /*
-      patch_intrinsic("cuda_match_all_sync_i32p",
-                      Intrinsic::nvvm_math_all_sync_i32);
-      */
+      // The three intrinsics below replace the stubs in runtime.cpp that
+      // previously contained PTX inline asm with AArch64-specific register
+      // constraints. See the comment in runtime.cpp for the full story.
+      // The LLVM 10 bugs that originally prevented using these intrinsics
+      // (commented out before this change) are long fixed in LLVM 22.
+      patch_intrinsic("cuda_active_mask", Intrinsic::nvvm_activemask);
 
-      // LLVM 10.0.0 seems to have a bug on this intrinsic function
-      /*
-      patch_intrinsic("cuda_match_any_sync_i64",
-                      Intrinsic::nvvm_match_any_sync_i64);
-                      */
+      // nvvm_match_all_sync_i32p returns {i32, i1}; extract only the i32.
+      // (The predicate is discarded — same as the old inline asm did.)
+      {
+        auto func = module->getFunction("cuda_match_all_sync_i32");
+        if (func) {
+          func->deleteBody();
+          auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+          IRBuilder<> builder(*ctx);
+          builder.SetInsertPoint(bb);
+          std::vector<llvm::Value *> args;
+          for (auto &arg : func->args())
+            args.push_back(&arg);
+          auto result = builder.CreateIntrinsic(Intrinsic::nvvm_match_all_sync_i32p, {}, args);
+          builder.CreateRet(builder.CreateExtractValue(result, {0}));
+          QuadrantsLLVMContext::mark_inline(func);
+        }
+      }
 
-      patch_intrinsic("ctlz_i32", Intrinsic::ctlz, true,
-                      {llvm::Type::getInt32Ty(*ctx)}, {get_constant(false)});
-      patch_intrinsic("cttz_i32", Intrinsic::cttz, true,
-                      {llvm::Type::getInt32Ty(*ctx)}, {get_constant(false)});
+      // cuda_match_any_sync_i64 is not registered in internal_ops.inc.h (no
+      // kernel IR emits calls to it), but it IS called from C++ runtime code
+      // in node_pointer.h::is_representative() on compute capability >= 70.
+      patch_intrinsic("cuda_match_any_sync_i64", Intrinsic::nvvm_match_any_sync_i64);
 
-      patch_intrinsic("block_memfence", Intrinsic::nvvm_membar_cta, false);
+      patch_intrinsic("ctlz_i32", Intrinsic::ctlz, true, {llvm::Type::getInt32Ty(*ctx)}, {get_constant(false)});
+      patch_intrinsic("cttz_i32", Intrinsic::cttz, true, {llvm::Type::getInt32Ty(*ctx)}, {get_constant(false)});
 
       link_module_with_cuda_libdevice(module);
 
@@ -560,8 +506,7 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
       auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
       IRBuilder<> builder(*ctx);
       builder.SetInsertPoint(bb);
-      auto dim_ = builder.CreateCall(actual_func->getFunctionType(),
-                                     actual_func, {lhs});
+      auto dim_ = builder.CreateCall(actual_func->getFunctionType(), actual_func, {lhs});
       auto ret_ = builder.CreateTrunc(dim_, llvm::Type::getInt32Ty(*ctx));
       builder.CreateRet(ret_);
       QuadrantsLLVMContext::mark_inline(func);
@@ -579,13 +524,179 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
       }
       function_pass_manager.doFinalization();
       patch_intrinsic("thread_idx", llvm::Intrinsic::amdgcn_workitem_id_x);
+      patch_intrinsic("block_thread_idx", llvm::Intrinsic::amdgcn_workitem_id_x);
       patch_intrinsic("block_idx", llvm::Intrinsic::amdgcn_workgroup_id_x);
-      patch_intrinsic("block_barrier", llvm::Intrinsic::amdgcn_s_barrier,
-                      false);
-      patch_intrinsic("amdgpu_clock_i64", llvm::Intrinsic::amdgcn_s_memtime);
 
-      auto patch_amdgpu_shfl_down = [&](std::string name, bool is_float,
-                                        bool has_mask) {
+      // Synthesize ``block_barrier`` as ``fence release "workgroup" -> s_barrier -> fence acquire "workgroup"`` (the
+      // same sequence HIP's ``__syncthreads()`` emits via ``__work_group_barrier`` in
+      // ``hip/amd_detail/amd_device_functions.h``). The bare ``llvm.amdgcn.s.barrier`` intrinsic only emits the
+      // ``s_barrier`` instruction; without the surrounding fences, LDS writes issued before the barrier are not
+      // guaranteed to be visible to other lanes after the barrier on RDNA3 because the AMDGCN backend has no
+      // memory-model edge tying the barrier to prior stores. Symptom that motivated this fix: at ``BLOCK_DIM=256`` /
+      // ``NUM_SUBGROUPS=4``, ``block.reduce`` reads stale garbage from its inter-subgroup ``SharedArray`` at
+      // ``NBLOCKS>=~200`` (intermittent below, near-deterministic above) -- exactly the "publish to LDS, barrier,
+      // read LDS" pattern that needs the release/acquire pair to be sound.
+      {
+        auto func = module->getFunction("block_barrier");
+        if (func) {
+          func->deleteBody();
+          auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+          IRBuilder<> builder(*ctx);
+          builder.SetInsertPoint(bb);
+          llvm::SyncScope::ID workgroup = ctx->getOrInsertSyncScopeID("workgroup");
+          builder.CreateFence(llvm::AtomicOrdering::Release, workgroup);
+          builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_s_barrier, llvm::ArrayRef<llvm::Type *>{},
+                                  llvm::ArrayRef<llvm::Value *>{});
+          builder.CreateFence(llvm::AtomicOrdering::Acquire, workgroup);
+          builder.CreateRetVoid();
+          QuadrantsLLVMContext::mark_inline(func);
+        }
+      }
+      patch_intrinsic("amdgpu_clock_i64", llvm::Intrinsic::amdgcn_s_memtime);
+      patch_intrinsic("amdgpu_ds_bpermute", llvm::Intrinsic::amdgcn_ds_bpermute);
+      // ``llvm.amdgcn.permlane64`` exchanges a 32-bit value between lanes ``i`` and ``i ^ 32`` in a single instruction.
+      // We use it to extend the SIMD32-scoped ``ds_bpermute`` (every shuffle op lowers to that) into a wave64-aware
+      // cross-half shuffle on RDNA: ``ds_bpermute`` reads within the lane's own 32-lane SIMD cluster, ``permlane64``
+      // brings the other SIMD's value to this lane, and we select between the two based on which half the target lane
+      // sits in. See ``amdgpu_cross_half_shuffle_i32`` in runtime.cpp. The instruction is gfx940+ (CDNA3) and gfx11+
+      // (RDNA3+) only -- on earlier wave64-capable targets (gfx9xx CDNA1/2, gfx10.x RDNA1/2) the AMDGPU LLVM backend
+      // hits "Cannot select" while lowering the intrinsic, so we have to provide a software emulation.
+      //
+      // The emulation is a wave-local LDS roundtrip: each lane writes its ``value`` to ``lds[wave_base + lane]``,
+      // a wavefront-scope acquire-release fence lowers to ``s_waitcnt lgkmcnt(0)`` (drains outstanding LDS writes),
+      // and each lane then reads ``lds[wave_base + (lane ^ 32)]``. On RDNA wave64-emulation the two SIMD32 halves of
+      // the wave issue store / load in two passes apiece, but the waitcnt between them guarantees both halves' stores
+      // are committed to LDS before either half's loads issue, so the cross-half routing is correct.  ``wave_base``
+      // is ``(workitem.id.x >> 6) << 6``, scoping the LDS slot to a single wave so multi-wave workgroups don't
+      // collide.  The LDS buffer is a 1024-entry per-workgroup global (4 KiB) -- enough for the AMDGPU 1024-thread
+      // workgroup max at wave64.  The buffer is only materialised on this code path, so kernels on permlane64-capable
+      // hardware (the common case) pay zero LDS for cross-half shuffles.
+      //
+      // The intrinsic is overloaded on its element type (signature ``T -> T`` for any 32-bit-or-smaller ``T``), so we
+      // have to pass the explicit ``i32`` type alongside the ID -- otherwise ``CreateIntrinsic`` segfaults inside
+      // ``getDeclaration()`` while resolving the mangled name.
+      auto mcpu_str = AMDGPUContext::get_instance().get_mcpu();
+      bool has_permlane64 = (mcpu_str == "gfx940" || mcpu_str == "gfx941" || mcpu_str == "gfx942" ||
+                             mcpu_str.substr(0, 5) == "gfx11" || mcpu_str.substr(0, 5) == "gfx12");
+      // Escape hatch for validating the LDS software emulation on hardware that natively supports
+      // ``v_permlane64_b32``: setting ``QD_AMDGPU_FORCE_PERMLANE64_FALLBACK=1`` forces the JIT to take the LDS path
+      // even on gfx11+ / gfx940+, so we can exercise the fallback on a working AMD box (gfx1100 / gfx942) without
+      // needing a gfx10.x runner.  Has no effect on non-AMDGPU backends.
+      if (const char *force_fallback = std::getenv("QD_AMDGPU_FORCE_PERMLANE64_FALLBACK")) {
+        if (force_fallback[0] == '1') {
+          has_permlane64 = false;
+        }
+      }
+      if (has_permlane64) {
+        patch_intrinsic("amdgpu_permlane64", llvm::Intrinsic::amdgcn_permlane64, true, {llvm::Type::getInt32Ty(*ctx)});
+      } else if (auto permlane64_func = module->getFunction("amdgpu_permlane64")) {
+        // LDS-based software emulation.  Layout: ``[1024 x i32] addrspace(3)`` indexed by ``wave_base + lane``.
+        auto i32_ty = llvm::Type::getInt32Ty(*ctx);
+        auto buf_ty = llvm::ArrayType::get(i32_ty, 1024);
+        auto lds_global = llvm::cast_or_null<llvm::GlobalVariable>(module->getNamedValue("__amdgpu_permlane64_lds"));
+        if (!lds_global) {
+          lds_global =
+              new llvm::GlobalVariable(*module, buf_ty, /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
+                                       llvm::UndefValue::get(buf_ty), "__amdgpu_permlane64_lds",
+                                       /*InsertBefore=*/nullptr, llvm::GlobalValue::NotThreadLocal, /*AddressSpace=*/3);
+          lds_global->setAlignment(llvm::Align(4));
+        }
+
+        permlane64_func->deleteBody();
+        auto bb = llvm::BasicBlock::Create(*ctx, "entry", permlane64_func);
+        IRBuilder<> builder(*ctx);
+        builder.SetInsertPoint(bb);
+
+        // lane = mbcnt_hi(-1, mbcnt_lo(-1, 0))
+        auto neg_one = llvm::ConstantInt::get(i32_ty, -1, /*IsSigned=*/true);
+        auto zero32 = llvm::ConstantInt::get(i32_ty, 0);
+        auto mbcnt_lo_fn = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::amdgcn_mbcnt_lo);
+        auto mbcnt_hi_fn = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::amdgcn_mbcnt_hi);
+        llvm::Value *mbcnt_lo_args[] = {neg_one, zero32};
+        auto lane_lo = builder.CreateCall(mbcnt_lo_fn, llvm::ArrayRef<llvm::Value *>(mbcnt_lo_args));
+        llvm::Value *mbcnt_hi_args[] = {neg_one, lane_lo};
+        auto lane = builder.CreateCall(mbcnt_hi_fn, llvm::ArrayRef<llvm::Value *>(mbcnt_hi_args));
+
+        // wave_base = (workitem.id.x >> 6) << 6 (wave64-scoped slot offset within the workgroup LDS buffer).
+        auto tid_fn = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::amdgcn_workitem_id_x);
+        auto tid = builder.CreateCall(tid_fn);
+        auto wave_id = builder.CreateLShr(tid, llvm::ConstantInt::get(i32_ty, 6));
+        auto wave_base = builder.CreateShl(wave_id, llvm::ConstantInt::get(i32_ty, 6));
+        auto slot = builder.CreateAdd(wave_base, lane);
+
+        // lds[slot] = value
+        auto value_arg = &*permlane64_func->arg_begin();
+        llvm::Value *store_idxs[] = {zero32, slot};
+        auto store_ptr = builder.CreateInBoundsGEP(buf_ty, lds_global, llvm::ArrayRef<llvm::Value *>(store_idxs));
+        builder.CreateStore(value_arg, store_ptr);
+
+        // Wavefront-scope acquire-release fence -> ``s_waitcnt lgkmcnt(0)`` on AMDGPU; orders LDS writes against
+        // subsequent LDS reads within the wave without touching cross-wave state (avoids the ``s_barrier`` that a
+        // workgroup-scope fence would emit, which deadlocks if only some waves in the workgroup reach this point).
+        llvm::SyncScope::ID wave_scope = ctx->getOrInsertSyncScopeID("wavefront");
+        builder.CreateFence(llvm::AtomicOrdering::AcquireRelease, wave_scope);
+
+        // partner_lane = lane ^ 32; result = lds[wave_base + partner_lane]
+        auto partner_lane = builder.CreateXor(lane, llvm::ConstantInt::get(i32_ty, 32));
+        auto partner_slot = builder.CreateAdd(wave_base, partner_lane);
+        llvm::Value *load_idxs[] = {zero32, partner_slot};
+        auto load_ptr = builder.CreateInBoundsGEP(buf_ty, lds_global, llvm::ArrayRef<llvm::Value *>(load_idxs));
+        auto result = builder.CreateAlignedLoad(i32_ty, load_ptr, llvm::Align(4));
+        builder.CreateRet(result);
+
+        QuadrantsLLVMContext::mark_inline(permlane64_func);
+      }
+      patch_intrinsic("amdgpu_mbcnt_lo", llvm::Intrinsic::amdgcn_mbcnt_lo);
+      patch_intrinsic("amdgpu_mbcnt_hi", llvm::Intrinsic::amdgcn_mbcnt_hi);
+      patch_intrinsic("amdgpu_ballot_w32", llvm::Intrinsic::amdgcn_ballot, true, {llvm::Type::getInt32Ty(*ctx)});
+      patch_intrinsic("amdgpu_ballot_w64", llvm::Intrinsic::amdgcn_ballot, true, {llvm::Type::getInt64Ty(*ctx)});
+
+      // Patch warp_size() for AMDGPU. The shared `cuda_kernel_utils.inc.h` stub returns 32, which is baked into the
+      // runtime bitcode by the host clang front-end. Without this patch, AMDGPU code that uses `warp_size()` (e.g. the
+      // per-lane serialization loop in locked_task.h, the warp reduction macro in runtime.cpp) believes the wave is 32
+      // wide and computes `warp_idx() = tid % 32` accordingly, even though we now force wave64 codegen. That mismatch
+      // causes lanes (i, i+32) to share a warp_idx and contend for the same intra-wave lock in lockstep, which
+      // deadlocks because the AMDGCN backend executes the locked body for both lanes simultaneously (e.g.
+      // test_ad_gdar_diffmpm hangs without this patch). Replace the body with a constant 64 so every consumer of
+      // warp_size() sees the real wave width.
+      auto patch_warp_size = [&]() {
+        auto func = module->getFunction("warp_size");
+        if (!func) {
+          return;
+        }
+        func->deleteBody();
+        auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+        IRBuilder<> builder(*ctx);
+        builder.SetInsertPoint(bb);
+        builder.CreateRet(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), kAmdgpuWaveSize));
+        QuadrantsLLVMContext::mark_inline(func);
+      };
+      patch_warp_size();
+
+      // AMDGPU memory fences (block-scope "workgroup" and device-scope "agent"). We can't use `patch_intrinsic` here
+      // because LLVM models `fence` as a first-class IR instruction (`builder.CreateFence(...)`), not as an intrinsic.
+      // We also can't compile `__builtin_amdgcn_fence` from `runtime.cpp` because that runtime is built with the host
+      // x86_64 clang front-end (which doesn't know AMDGCN builtins) and only retargeted to amdgcn here. So we
+      // synthesize the fence body in IR directly with the AMDGPU-specific syncscope name; the AMDGCN backend
+      // recognizes "workgroup" / "agent" scopes and lowers each to the right `s_waitcnt` / cache-flush sequence.
+      auto patch_fence = [&](const std::string &name, const std::string &scope_str) {
+        auto func = module->getFunction(name);
+        if (!func) {
+          return;
+        }
+        func->deleteBody();
+        auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+        IRBuilder<> builder(*ctx);
+        builder.SetInsertPoint(bb);
+        llvm::SyncScope::ID scope_id = ctx->getOrInsertSyncScopeID(scope_str);
+        builder.CreateFence(llvm::AtomicOrdering::AcquireRelease, scope_id);
+        builder.CreateRetVoid();
+        QuadrantsLLVMContext::mark_inline(func);
+      };
+      patch_fence("block_mem_fence", "workgroup");
+      patch_fence("grid_mem_fence", "agent");
+
+      auto patch_amdgpu_shfl_down = [&](std::string name, bool is_float, bool has_mask) {
         auto func = module->getFunction(name);
         if (!func) {
           return;
@@ -620,34 +731,28 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
 
         auto *neg_one = llvm::ConstantInt::get(i32_ty, -1, true);
         auto *zero = llvm::ConstantInt::get(i32_ty, 0);
-        auto *mbcnt_lo = builder.CreateIntrinsic(
-            llvm::Intrinsic::amdgcn_mbcnt_lo, {}, {neg_one, zero});
-        auto *lane_id = builder.CreateIntrinsic(
-            llvm::Intrinsic::amdgcn_mbcnt_hi, {}, {neg_one, mbcnt_lo});
+        auto *mbcnt_lo = builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_mbcnt_lo, {}, {neg_one, zero});
+        auto *lane_id = builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_mbcnt_hi, {}, {neg_one, mbcnt_lo});
 
         auto *src_lane = builder.CreateAdd(lane_id, delta_arg);
         // Wave-wide bound only: source lane must be in [0, 64).
         auto *wave_size = llvm::ConstantInt::get(i32_ty, 64);
         auto *in_wave = builder.CreateICmpULT(src_lane, wave_size);
 
-        auto *addr =
-            builder.CreateShl(src_lane, llvm::ConstantInt::get(i32_ty, 2));
-        auto *bpermute_i32 = builder.CreateIntrinsic(
-            llvm::Intrinsic::amdgcn_ds_bpermute, {}, {addr, val_i32});
+        auto *addr = builder.CreateShl(src_lane, llvm::ConstantInt::get(i32_ty, 2));
+        auto *bpermute_i32 = builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_ds_bpermute, {}, {addr, val_i32});
 
         auto *picked = builder.CreateSelect(in_wave, bpermute_i32, val_i32);
 
         if (is_float) {
-          builder.CreateRet(
-              builder.CreateBitCast(picked, builder.getFloatTy()));
+          builder.CreateRet(builder.CreateBitCast(picked, builder.getFloatTy()));
         } else {
           builder.CreateRet(picked);
         }
         QuadrantsLLVMContext::mark_inline(func);
       };
 
-      auto patch_amdgpu_shfl_up = [&](std::string name, bool is_float,
-                                      bool has_mask) {
+      auto patch_amdgpu_shfl_up = [&](std::string name, bool is_float, bool has_mask) {
         auto func = module->getFunction(name);
         if (!func) {
           return;
@@ -675,29 +780,23 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
         }
         auto *neg_one = llvm::ConstantInt::get(i32_ty, -1, true);
         auto *zero = llvm::ConstantInt::get(i32_ty, 0);
-        auto *mbcnt_lo = builder.CreateIntrinsic(
-            llvm::Intrinsic::amdgcn_mbcnt_lo, {}, {neg_one, zero});
-        auto *lane_id = builder.CreateIntrinsic(
-            llvm::Intrinsic::amdgcn_mbcnt_hi, {}, {neg_one, mbcnt_lo});
+        auto *mbcnt_lo = builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_mbcnt_lo, {}, {neg_one, zero});
+        auto *lane_id = builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_mbcnt_hi, {}, {neg_one, mbcnt_lo});
         auto *src_lane = builder.CreateSub(lane_id, delta_arg);
         // Wave-wide bound: src_lane must be >= 0.
         auto *in_wave = builder.CreateICmpSGE(src_lane, zero);
-        auto *addr =
-            builder.CreateShl(src_lane, llvm::ConstantInt::get(i32_ty, 2));
-        auto *bpermute_i32 = builder.CreateIntrinsic(
-            llvm::Intrinsic::amdgcn_ds_bpermute, {}, {addr, val_i32});
+        auto *addr = builder.CreateShl(src_lane, llvm::ConstantInt::get(i32_ty, 2));
+        auto *bpermute_i32 = builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_ds_bpermute, {}, {addr, val_i32});
         auto *picked = builder.CreateSelect(in_wave, bpermute_i32, val_i32);
         if (is_float) {
-          builder.CreateRet(
-              builder.CreateBitCast(picked, builder.getFloatTy()));
+          builder.CreateRet(builder.CreateBitCast(picked, builder.getFloatTy()));
         } else {
           builder.CreateRet(picked);
         }
         QuadrantsLLVMContext::mark_inline(func);
       };
 
-      auto patch_amdgpu_shfl_idx = [&](std::string name, bool is_float,
-                                       bool has_mask) {
+      auto patch_amdgpu_shfl_idx = [&](std::string name, bool is_float, bool has_mask) {
         // shfl_sync(mask, val, src_lane, width): broadcast val from src_lane
         // to all lanes. Implemented via amdgcn.ds.bpermute(src_lane * 4, val).
         // The lowering is wave-wide; `width` is intentionally ignored on AMD
@@ -727,21 +826,17 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
         if (is_float) {
           val_i32 = builder.CreateBitCast(val_arg, i32_ty);
         }
-        auto *addr =
-            builder.CreateShl(src_lane_arg, llvm::ConstantInt::get(i32_ty, 2));
-        auto *bpermute_i32 = builder.CreateIntrinsic(
-            llvm::Intrinsic::amdgcn_ds_bpermute, {}, {addr, val_i32});
+        auto *addr = builder.CreateShl(src_lane_arg, llvm::ConstantInt::get(i32_ty, 2));
+        auto *bpermute_i32 = builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_ds_bpermute, {}, {addr, val_i32});
         if (is_float) {
-          builder.CreateRet(
-              builder.CreateBitCast(bpermute_i32, builder.getFloatTy()));
+          builder.CreateRet(builder.CreateBitCast(bpermute_i32, builder.getFloatTy()));
         } else {
           builder.CreateRet(bpermute_i32);
         }
         QuadrantsLLVMContext::mark_inline(func);
       };
 
-      auto patch_amdgpu_shfl_xor = [&](std::string name, bool is_float,
-                                       bool has_mask) {
+      auto patch_amdgpu_shfl_xor = [&](std::string name, bool is_float, bool has_mask) {
         auto func = module->getFunction(name);
         if (!func) {
           return;
@@ -769,18 +864,13 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
         }
         auto *neg_one = llvm::ConstantInt::get(i32_ty, -1, true);
         auto *zero = llvm::ConstantInt::get(i32_ty, 0);
-        auto *mbcnt_lo = builder.CreateIntrinsic(
-            llvm::Intrinsic::amdgcn_mbcnt_lo, {}, {neg_one, zero});
-        auto *lane_id = builder.CreateIntrinsic(
-            llvm::Intrinsic::amdgcn_mbcnt_hi, {}, {neg_one, mbcnt_lo});
+        auto *mbcnt_lo = builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_mbcnt_lo, {}, {neg_one, zero});
+        auto *lane_id = builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_mbcnt_hi, {}, {neg_one, mbcnt_lo});
         auto *src_lane = builder.CreateXor(lane_id, delta_arg);
-        auto *addr =
-            builder.CreateShl(src_lane, llvm::ConstantInt::get(i32_ty, 2));
-        auto *bpermute_i32 = builder.CreateIntrinsic(
-            llvm::Intrinsic::amdgcn_ds_bpermute, {}, {addr, val_i32});
+        auto *addr = builder.CreateShl(src_lane, llvm::ConstantInt::get(i32_ty, 2));
+        auto *bpermute_i32 = builder.CreateIntrinsic(llvm::Intrinsic::amdgcn_ds_bpermute, {}, {addr, val_i32});
         if (is_float) {
-          builder.CreateRet(
-              builder.CreateBitCast(bpermute_i32, builder.getFloatTy()));
+          builder.CreateRet(builder.CreateBitCast(bpermute_i32, builder.getFloatTy()));
         } else {
           builder.CreateRet(bpermute_i32);
         }
@@ -809,10 +899,8 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
                             /*has_mask=*/true);
 
       link_module_with_amdgpu_libdevice(module);
-      patch_amdgpu_kernel_dim(
-          "block_dim", llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0));
-      patch_amdgpu_kernel_dim(
-          "grid_dim", llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0));
+      patch_amdgpu_kernel_dim("block_dim", llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0));
+      patch_amdgpu_kernel_dim("grid_dim", llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), 0));
 #endif
     }
   }
@@ -826,8 +914,7 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
       IRBuilder<> builder(*ctx);
       builder.SetInsertPoint(bb);
       // Use readcyclecounter intrinsic (maps to rdtsc on x86, etc.)
-      builder.CreateRet(builder.CreateIntrinsic(Intrinsic::readcyclecounter,
-                                                ArrayRef<llvm::Value *>{}));
+      builder.CreateRet(builder.CreateIntrinsic(Intrinsic::readcyclecounter, ArrayRef<llvm::Value *>{}));
       QuadrantsLLVMContext::mark_inline(func);
     }
   }
@@ -839,32 +926,26 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(
   return module;
 }
 
-void QuadrantsLLVMContext::link_module_with_custom_cuda_library(
-    std::unique_ptr<llvm::Module> &module) {
+void QuadrantsLLVMContext::link_module_with_custom_cuda_library(std::unique_ptr<llvm::Module> &module) {
   std::string cuda_library_path = get_custom_cuda_library_path();
   if (!cuda_library_path.empty()) {
-    std::unique_ptr<llvm::Module> cuda_library_module =
-        module_from_bitcode_file(
-            fmt::format("{}/{}", runtime_lib_dir(),
-                        "cuda_runtime-cuda-nvptx64-nvidia-cuda-sm_60.bc"),
-            get_this_thread_context());
+    std::unique_ptr<llvm::Module> cuda_library_module = module_from_bitcode_file(
+        fmt::format("{}/{}", runtime_lib_dir(), "cuda_runtime-cuda-nvptx64-nvidia-cuda-sm_60.bc"),
+        get_this_thread_context());
 
     module->setDataLayout(cuda_library_module->getDataLayout());
-    bool failed =
-        llvm::Linker::linkModules(*module, std::move(cuda_library_module));
+    bool failed = llvm::Linker::linkModules(*module, std::move(cuda_library_module));
     if (failed) {
       QD_ERROR("cuda_runtime.bc linking failure.");
     }
   }
 }
 
-void QuadrantsLLVMContext::link_module_with_cuda_libdevice(
-    std::unique_ptr<llvm::Module> &module) {
+void QuadrantsLLVMContext::link_module_with_cuda_libdevice(std::unique_ptr<llvm::Module> &module) {
   QD_AUTO_PROF
   QD_ASSERT(arch_ == Arch::cuda);
 
-  auto libdevice_module =
-      module_from_bitcode_file(libdevice_path(), get_this_thread_context());
+  auto libdevice_module = module_from_bitcode_file(libdevice_path(), get_this_thread_context());
 
   std::vector<std::string> libdevice_function_names;
   for (auto &f : *libdevice_module) {
@@ -875,7 +956,20 @@ void QuadrantsLLVMContext::link_module_with_cuda_libdevice(
 
   libdevice_module->setTargetTriple(llvm::Triple("nvptx64-nvidia-cuda"));
   strip_nvvmir_version(libdevice_module.get());
-  module->setDataLayout(libdevice_module->getDataLayout());
+
+  // `slim_libdevice.10.bc` ships without an explicit `target datalayout` line (only the `nvptx64-nvidia-gpulibs`
+  // triple), so its `getDataLayout()` returns the empty LLVM-default DL where `i64` ABI alignment is 4 bytes.
+  // Previously we copied that empty DL straight into the kernel module, which made every CreateStore / CreateLoad
+  // of i64 emit `align 4` -> the NVPTX backend then split each `align 4` i64 store into two `st.b32` halves, and
+  // ptxas in turn mis-combined those halves into a single `ST.E.64` that dropped the low 32 bits of values produced
+  // by f64 / i64 arithmetic (single 64-bit virtual reg holding the full bit pattern). End result: silent precision
+  // loss for `bit_cast(scan_result_f64, u64)` and friends.
+  //
+  // Pin the canonical NVPTX64 DL (matches LLVM's `NVPTXTargetMachine::computeDataLayout(is64Bit=true,
+  // UseShortPointers=false)`) so CreateStore / CreateLoad see `i64:64` and emit single aligned `st.b64` / `ld.b64`.
+  static const char *kNVPTX64DataLayout = "e-p6:32:32-i64:64-i128:128-v16:16-v32:32-n16:32:64";
+  module->setDataLayout(kNVPTX64DataLayout);
+  libdevice_module->setDataLayout(kNVPTX64DataLayout);
 
   bool failed = llvm::Linker::linkModules(*module, std::move(libdevice_module));
   if (failed) {
@@ -891,8 +985,7 @@ void QuadrantsLLVMContext::link_module_with_cuda_libdevice(
   }
 }
 
-void QuadrantsLLVMContext::link_module_with_amdgpu_libdevice(
-    std::unique_ptr<llvm::Module> &module) {
+void QuadrantsLLVMContext::link_module_with_amdgpu_libdevice(std::unique_ptr<llvm::Module> &module) {
   QD_ASSERT(arch_ == Arch::amdgpu);
 #if defined(QD_WITH_AMDGPU)
   auto mcpu = AMDGPUContext::get_instance().get_mcpu();
@@ -911,8 +1004,13 @@ void QuadrantsLLVMContext::link_module_with_amdgpu_libdevice(
         isa_file, mcpu);
   }
 
+  // Force wave64 on every AMDGPU target (CDNA gfx9xx are wave64 by default; RDNA gfx10/11/12 default to wave32 but also
+  // support wave64). Linking the wavefrontsize64=on libdevice variant aligns the ROCm device libraries with the wave64
+  // codegen forced via target-features in llvm_context_pass.h::AMDGPUConvertAllocaInstAddressSpacePass and
+  // jit_amdgpu.cpp's TargetMachine features. See `hp/always-wave64`: testing both wave modes was costly, so we
+  // standardize on wave64.
   std::string libdevice_files[] = {"ocml.bc",
-                                   "oclc_wavefrontsize64_off.bc",
+                                   "oclc_wavefrontsize64_on.bc",
                                    "ockl.bc",
                                    "oclc_abi_version_400.bc",
                                    "oclc_correctly_rounded_sqrt_off.bc",
@@ -923,8 +1021,7 @@ void QuadrantsLLVMContext::link_module_with_amdgpu_libdevice(
                                    "opencl.bc"};
 
   for (auto &libdevice : libdevice_files) {
-    auto libdevice_module = module_from_bitcode_file(lib_dir + libdevice,
-                                                     get_this_thread_context());
+    auto libdevice_module = module_from_bitcode_file(lib_dir + libdevice, get_this_thread_context());
 
     if (libdevice == "ocml.bc")
       module->setDataLayout(libdevice_module->getDataLayout());
@@ -942,8 +1039,7 @@ void QuadrantsLLVMContext::link_module_with_amdgpu_libdevice(
         f.setLinkage(llvm::Function::CommonLinkage);
     }
 
-    bool failed =
-        llvm::Linker::linkModules(*module, std::move(libdevice_module));
+    bool failed = llvm::Linker::linkModules(*module, std::move(libdevice_module));
     if (failed) {
       QD_ERROR("AMDGPU libdevice linking failure.");
     }
@@ -951,8 +1047,7 @@ void QuadrantsLLVMContext::link_module_with_amdgpu_libdevice(
 #endif
 }
 
-void QuadrantsLLVMContext::add_struct_module(std::unique_ptr<Module> module,
-                                             int tree_id) {
+void QuadrantsLLVMContext::add_struct_module(std::unique_ptr<Module> module, int tree_id) {
   QD_AUTO_PROF;
   QD_ASSERT(std::this_thread::get_id() == main_thread_id_);
   auto this_thread_data = get_this_thread_data();
@@ -969,8 +1064,7 @@ void QuadrantsLLVMContext::add_struct_module(std::unique_ptr<Module> module,
     if (id == std::this_thread::get_id()) {
       continue;
     }
-    data->struct_modules[tree_id] =
-        clone_module_to_context(module.get(), data->llvm_context);
+    data->struct_modules[tree_id] = clone_module_to_context(module.get(), data->llvm_context);
   }
 
   this_thread_data->struct_modules[tree_id] = std::move(module);
@@ -985,15 +1079,12 @@ llvm::Value *QuadrantsLLVMContext::get_constant(DataType dt, T t) {
   } else if (dt->is_primitive(PrimitiveTypeID::f64)) {
     return llvm::ConstantFP::get(*ctx, llvm::APFloat((float64)t));
   } else if (dt->is_primitive(PrimitiveTypeID::u1)) {
-    return t ? llvm::ConstantInt::getTrue(*ctx)
-             : llvm::ConstantInt::getFalse(*ctx);
+    return t ? llvm::ConstantInt::getTrue(*ctx) : llvm::ConstantInt::getFalse(*ctx);
   } else if (is_integral(dt)) {
     if (is_signed(dt)) {
-      return llvm::ConstantInt::get(
-          *ctx, llvm::APInt(data_type_bits(dt), (uint64_t)t, true));
+      return llvm::ConstantInt::get(*ctx, llvm::APInt(data_type_bits(dt), (uint64_t)t, true));
     } else {
-      return llvm::ConstantInt::get(
-          *ctx, llvm::APInt(data_type_bits(dt), (uint64_t)t, false));
+      return llvm::ConstantInt::get(*ctx, llvm::APInt(data_type_bits(dt), (uint64_t)t, false));
     }
   } else {
     QD_NOT_IMPLEMENTED
@@ -1004,22 +1095,18 @@ template llvm::Value *QuadrantsLLVMContext::get_constant(DataType dt, int32 t);
 template llvm::Value *QuadrantsLLVMContext::get_constant(DataType dt, int64 t);
 template llvm::Value *QuadrantsLLVMContext::get_constant(DataType dt, uint32 t);
 template llvm::Value *QuadrantsLLVMContext::get_constant(DataType dt, uint64 t);
-template llvm::Value *QuadrantsLLVMContext::get_constant(DataType dt,
-                                                         float32 t);
-template llvm::Value *QuadrantsLLVMContext::get_constant(DataType dt,
-                                                         float64 t);
+template llvm::Value *QuadrantsLLVMContext::get_constant(DataType dt, float32 t);
+template llvm::Value *QuadrantsLLVMContext::get_constant(DataType dt, float64 t);
 
 template <typename T>
 llvm::Value *QuadrantsLLVMContext::get_constant(T t) {
   auto ctx = get_this_thread_context();
   QD_ASSERT(ctx != nullptr);
   using TargetType = T;
-  if constexpr (std::is_same_v<TargetType, float32> ||
-                std::is_same_v<TargetType, float64>) {
+  if constexpr (std::is_same_v<TargetType, float32> || std::is_same_v<TargetType, float64>) {
     return llvm::ConstantFP::get(*ctx, llvm::APFloat(t));
   } else if (std::is_same_v<TargetType, bool>) {
-    return t ? llvm::ConstantInt::getTrue(*ctx)
-             : llvm::ConstantInt::getFalse(*ctx);
+    return t ? llvm::ConstantInt::getTrue(*ctx) : llvm::ConstantInt::getFalse(*ctx);
   } else if (std::is_same_v<TargetType, int32>) {
     return llvm::ConstantInt::get(*ctx, llvm::APInt(32, (uint64_t)t, true));
   } else if (std::is_same_v<TargetType, uint32>) {
@@ -1027,8 +1114,7 @@ llvm::Value *QuadrantsLLVMContext::get_constant(T t) {
   } else if (std::is_same_v<TargetType, int64>) {
     static_assert(sizeof(std::size_t) == sizeof(uint64));
     return llvm::ConstantInt::get(*ctx, llvm::APInt(64, (uint64_t)t, true));
-  } else if (std::is_same_v<TargetType, std::size_t> ||
-             std::is_same_v<TargetType, uint64>) {
+  } else if (std::is_same_v<TargetType, std::size_t> || std::is_same_v<TargetType, uint64>) {
     static_assert(sizeof(std::size_t) == sizeof(uint64));
     return llvm::ConstantInt::get(*ctx, llvm::APInt(64, (uint64_t)t, false));
   } else {
@@ -1047,9 +1133,7 @@ std::size_t QuadrantsLLVMContext::get_type_size(llvm::Type *type) {
   return get_data_layout().getTypeAllocSize(type);
 }
 
-std::size_t QuadrantsLLVMContext::get_struct_element_offset(
-    llvm::StructType *type,
-    int idx) {
+std::size_t QuadrantsLLVMContext::get_struct_element_offset(llvm::StructType *type, int idx) {
   return get_data_layout().getStructLayout(type)->getElementOffset(idx);
 }
 
@@ -1063,8 +1147,7 @@ void QuadrantsLLVMContext::mark_inline(llvm::Function *f) {
   for (auto &B : *f)
     for (auto &I : B) {
       if (auto *call = llvm::dyn_cast<llvm::CallInst>(&I)) {
-        if (auto func = call->getCalledFunction();
-            func && func->getName() == "mark_force_no_inline") {
+        if (auto func = call->getCalledFunction(); func && func->getName() == "mark_force_no_inline") {
           // Found "mark_force_no_inline". Do not inline.
           return;
         }
@@ -1102,9 +1185,7 @@ llvm::DataLayout QuadrantsLLVMContext::get_data_layout() {
   return data_layout_;
 }
 
-void QuadrantsLLVMContext::insert_nvvm_annotation(llvm::Function *func,
-                                                  std::string key,
-                                                  int val) {
+void QuadrantsLLVMContext::insert_nvvm_annotation(llvm::Function *func, std::string key, int val) {
   /*******************************************************************
   Example annotation from llvm PTX doc:
 
@@ -1118,19 +1199,15 @@ void QuadrantsLLVMContext::insert_nvvm_annotation(llvm::Function *func,
                float addrspace(1)*)* @kernel, !"kernel", i32 1}
   *******************************************************************/
   auto ctx = get_this_thread_context();
-  llvm::Metadata *md_args[] = {llvm::ValueAsMetadata::get(func),
-                               MDString::get(*ctx, key),
+  llvm::Metadata *md_args[] = {llvm::ValueAsMetadata::get(func), MDString::get(*ctx, key),
                                llvm::ValueAsMetadata::get(get_constant(val))};
 
   MDNode *md_node = MDNode::get(*ctx, md_args);
 
-  func->getParent()
-      ->getOrInsertNamedMetadata("nvvm.annotations")
-      ->addOperand(md_node);
+  func->getParent()->getOrInsertNamedMetadata("nvvm.annotations")->addOperand(md_node);
 }
 
-void QuadrantsLLVMContext::mark_function_as_cuda_kernel(llvm::Function *func,
-                                                        int block_dim) {
+void QuadrantsLLVMContext::mark_function_as_cuda_kernel(llvm::Function *func, int block_dim) {
   // Mark kernel function as a CUDA __global__ function.
   // Use the ptx_kernel calling convention so the kernel marker survives
   // optimization passes (nvvm.annotations metadata gets stripped by O3).
@@ -1144,8 +1221,7 @@ void QuadrantsLLVMContext::mark_function_as_cuda_kernel(llvm::Function *func,
   }
 }
 
-void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(llvm::Function *func,
-                                                          int block_dim) {
+void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(llvm::Function *func, int block_dim) {
   func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
   if (block_dim > 0) {
     // Note: hardcoded wavefront size of 64 matches CDNA3. RDNA in wave32
@@ -1154,15 +1230,13 @@ void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(llvm::Function *func,
     constexpr int kAmdgpuWavefrontSize = 64;
     int min_block_dim = std::max(block_dim, kAmdgpuWavefrontSize);
     int max_block_dim = std::max(block_dim, kAmdgpuWavefrontSize);
-    std::string size_str =
-        std::to_string(min_block_dim) + "," + std::to_string(max_block_dim);
+    std::string size_str = std::to_string(min_block_dim) + "," + std::to_string(max_block_dim);
     func->addFnAttr("amdgpu-flat-work-group-size", size_str);
   }
 }
 
-void QuadrantsLLVMContext::eliminate_unused_functions(
-    llvm::Module *module,
-    std::function<bool(const std::string &)> export_indicator) {
+void QuadrantsLLVMContext::eliminate_unused_functions(llvm::Module *module,
+                                                      std::function<bool(const std::string &)> export_indicator) {
   QD_AUTO_PROF
   using namespace llvm;
   QD_ASSERT(module);
@@ -1177,15 +1251,13 @@ void QuadrantsLLVMContext::eliminate_unused_functions(
   llvm::ModuleAnalysisManager ana;
   llvm::PassBuilder pb;
   pb.registerModuleAnalyses(ana);
-  manager.addPass(llvm::InternalizePass([&](const GlobalValue &val) -> bool {
-    return export_indicator(val.getName().str());
-  }));
+  manager.addPass(
+      llvm::InternalizePass([&](const GlobalValue &val) -> bool { return export_indicator(val.getName().str()); }));
   manager.addPass(GlobalDCEPass());
   manager.run(*module, ana);
 }
 
-QuadrantsLLVMContext::ThreadLocalData *
-QuadrantsLLVMContext::get_this_thread_data() {
+QuadrantsLLVMContext::ThreadLocalData *QuadrantsLLVMContext::get_this_thread_data() {
   std::lock_guard<std::mutex> _(thread_map_mut_);
   auto tid = std::this_thread::get_id();
   if (per_thread_data_.find(tid) == per_thread_data_.end()) {
@@ -1193,8 +1265,7 @@ QuadrantsLLVMContext::get_this_thread_data() {
     ss << tid;
     QD_TRACE("Creating thread local data for thread {}", ss.str());
     per_thread_data_[tid] = std::make_unique<ThreadLocalData>(
-        std::make_unique<llvm::orc::ThreadSafeContext>(
-            std::make_unique<llvm::LLVMContext>()));
+        std::make_unique<llvm::orc::ThreadSafeContext>(std::make_unique<llvm::LLVMContext>()));
   }
   return per_thread_data_[tid].get();
 }
@@ -1205,8 +1276,7 @@ llvm::LLVMContext *QuadrantsLLVMContext::get_this_thread_context() {
   return data->llvm_context;
 }
 
-llvm::orc::ThreadSafeContext *
-QuadrantsLLVMContext::get_this_thread_thread_safe_context() {
+llvm::orc::ThreadSafeContext *QuadrantsLLVMContext::get_this_thread_thread_safe_context() {
   get_this_thread_context();  // make sure the context is created
   ThreadLocalData *data = get_this_thread_data();
   return data->thread_safe_llvm_context.get();
@@ -1228,8 +1298,7 @@ template llvm::Value *QuadrantsLLVMContext::get_constant(unsigned long t);
 #endif
 
 auto make_slim_libdevice = [](const std::vector<std::string> &args) {
-  QD_ASSERT_INFO(args.size() == 1,
-                 "Usage: ti task make_slim_libdevice [libdevice.X.bc file]");
+  QD_ASSERT_INFO(args.size() == 1, "Usage: ti task make_slim_libdevice [libdevice.X.bc file]");
 
   auto ctx = std::make_unique<llvm::LLVMContext>();
   auto libdevice_module = module_from_bitcode_file(args[0], ctx.get());
@@ -1278,8 +1347,7 @@ void QuadrantsLLVMContext::init_runtime_module(llvm::Module *runtime_module) {
   }
 
   eliminate_unused_functions(runtime_module, [](std::string func_name) {
-    return starts_with(func_name, "runtime_") ||
-           starts_with(func_name, "LLVMRuntime_");
+    return starts_with(func_name, "runtime_") || starts_with(func_name, "LLVMRuntime_");
   });
 }
 
@@ -1299,8 +1367,7 @@ void QuadrantsLLVMContext::fetch_this_thread_struct_module() {
   }
 }
 
-llvm::Function *QuadrantsLLVMContext::get_runtime_function(
-    const std::string &name) {
+llvm::Function *QuadrantsLLVMContext::get_runtime_function(const std::string &name) {
   return get_this_thread_runtime_module()->getFunction(name);
 }
 
@@ -1313,35 +1380,27 @@ llvm::Module *QuadrantsLLVMContext::get_this_thread_runtime_module() {
   return data->runtime_module.get();
 }
 
-llvm::Function *QuadrantsLLVMContext::get_struct_function(
-    const std::string &name,
-    int tree_id) {
+llvm::Function *QuadrantsLLVMContext::get_struct_function(const std::string &name, int tree_id) {
   auto *data = get_this_thread_data();
   return data->struct_modules[tree_id]->getFunction(name);
 }
 
 llvm::Type *QuadrantsLLVMContext::get_runtime_type(const std::string &name) {
-  auto ty = llvm::StructType::getTypeByName(
-      get_this_thread_runtime_module()->getContext(), ("struct." + name));
+  auto ty = llvm::StructType::getTypeByName(get_this_thread_runtime_module()->getContext(), ("struct." + name));
   if (!ty) {
     QD_ERROR("LLVMRuntime type {} not found.", name);
   }
   return ty;
 }
-std::unique_ptr<llvm::Module> QuadrantsLLVMContext::new_module(
-    std::string name,
-    llvm::LLVMContext *context) {
-  auto new_mod = std::make_unique<llvm::Module>(
-      name, context ? *context : *get_this_thread_context());
+std::unique_ptr<llvm::Module> QuadrantsLLVMContext::new_module(std::string name, llvm::LLVMContext *context) {
+  auto new_mod = std::make_unique<llvm::Module>(name, context ? *context : *get_this_thread_context());
   new_mod->setDataLayout(get_this_thread_runtime_module()->getDataLayout());
   return new_mod;
 }
 
-QuadrantsLLVMContext::ThreadLocalData::ThreadLocalData(
-    std::unique_ptr<llvm::orc::ThreadSafeContext> ctx)
+QuadrantsLLVMContext::ThreadLocalData::ThreadLocalData(std::unique_ptr<llvm::orc::ThreadSafeContext> ctx)
     : thread_safe_llvm_context(std::move(ctx)),
-      llvm_context(thread_safe_llvm_context->withContextDo(
-          [](llvm::LLVMContext *C) { return C; })) {
+      llvm_context(thread_safe_llvm_context->withContextDo([](llvm::LLVMContext *C) { return C; })) {
 }
 
 QuadrantsLLVMContext::ThreadLocalData::~ThreadLocalData() {
@@ -1350,8 +1409,7 @@ QuadrantsLLVMContext::ThreadLocalData::~ThreadLocalData() {
   thread_safe_llvm_context.reset();
 }
 
-LLVMCompiledKernel QuadrantsLLVMContext::link_compiled_tasks(
-    std::vector<std::unique_ptr<LLVMCompiledTask>> data_list) {
+LLVMCompiledKernel QuadrantsLLVMContext::link_compiled_tasks(std::vector<std::unique_ptr<LLVMCompiledTask>> data_list) {
   LLVMCompiledKernel linked;
   std::unordered_set<int> used_tree_ids;
   std::unordered_set<int> tls_sizes;
@@ -1369,31 +1427,24 @@ LLVMCompiledKernel QuadrantsLLVMContext::link_compiled_tasks(
       offloaded_names.insert(task.name);
       linked.tasks.push_back(std::move(task));
     }
-    linker.linkInModule(clone_module_to_context(
-        datum->module.get(), linking_context_data->llvm_context));
+    linker.linkInModule(clone_module_to_context(datum->module.get(), linking_context_data->llvm_context));
   }
   for (auto tree_id : used_tree_ids) {
-    linker.linkInModule(
-        llvm::CloneModule(*linking_context_data->struct_modules[tree_id]),
-        llvm::Linker::LinkOnlyNeeded | llvm::Linker::OverrideFromSrc);
+    linker.linkInModule(llvm::CloneModule(*linking_context_data->struct_modules[tree_id]),
+                        llvm::Linker::LinkOnlyNeeded | llvm::Linker::OverrideFromSrc);
   }
-  auto runtime_module =
-      llvm::CloneModule(*linking_context_data->runtime_module);
+  auto runtime_module = llvm::CloneModule(*linking_context_data->runtime_module);
   for (auto tls_size : tls_sizes) {
     add_struct_for_func(runtime_module.get(), tls_size);
   }
-  linker.linkInModule(
-      std::move(runtime_module),
-      llvm::Linker::LinkOnlyNeeded | llvm::Linker::OverrideFromSrc);
-  eliminate_unused_functions(mod.get(), [&](std::string func_name) -> bool {
-    return offloaded_names.count(func_name);
-  });
+  linker.linkInModule(std::move(runtime_module), llvm::Linker::LinkOnlyNeeded | llvm::Linker::OverrideFromSrc);
+  eliminate_unused_functions(mod.get(),
+                             [&](std::string func_name) -> bool { return offloaded_names.count(func_name); });
   linked.module = std::move(mod);
   return linked;
 }
 
-void QuadrantsLLVMContext::add_struct_for_func(llvm::Module *module,
-                                               int tls_size) {
+void QuadrantsLLVMContext::add_struct_for_func(llvm::Module *module, int tls_size) {
   // Note that on CUDA local array allocation must have a compile-time
   // constant size. Therefore, instead of passing in the tls_buffer_size
   // argument, we directly clone the "parallel_struct_for" function and
@@ -1406,8 +1457,7 @@ void QuadrantsLLVMContext::add_struct_for_func(llvm::Module *module,
   llvm::legacy::PassManager module_pass_manager;
   if (config_.arch == Arch::amdgpu) {
 #ifdef QD_WITH_AMDGPU
-    module_pass_manager.add(
-        new AMDGPUAddStructForFuncPass(func_name, tls_size));
+    module_pass_manager.add(new AMDGPUAddStructForFuncPass(func_name, tls_size));
     module_pass_manager.run(*module);
 #else
     QD_NOT_IMPLEMENTED
@@ -1431,8 +1481,7 @@ llvm::DataLayout QuadrantsLLVMContext::get_data_layout(Arch arch) {
     auto jtmb = *expected_jtmb;
     auto expected_data_layout = jtmb.getDefaultDataLayoutForTarget();
     if (!expected_data_layout) {
-      QD_ERROR(
-          "LLVM TargetMachineBuilder has failed when getting data layout.");
+      QD_ERROR("LLVM TargetMachineBuilder has failed when getting data layout.");
     }
     return *expected_data_layout;
   } else if (arch == Arch::cuda) {
@@ -1454,8 +1503,7 @@ std::string QuadrantsLLVMContext::get_data_layout_string() {
   return get_data_layout().getStringRepresentation();
 }
 
-std::pair<const StructType *, size_t>
-QuadrantsLLVMContext::get_struct_type_with_data_layout(
+std::pair<const StructType *, size_t> QuadrantsLLVMContext::get_struct_type_with_data_layout(
     const StructType *old_ty,
     const std::string &layout) {
   auto *llvm_struct_type = llvm::cast<llvm::StructType>(get_data_type(old_ty));
@@ -1468,18 +1516,14 @@ QuadrantsLLVMContext::get_struct_type_with_data_layout(
   std::vector<AbstractDictionaryMember> elements = old_ty->elements();
   for (auto &element : elements) {
     if (auto struct_type = element.type->cast<StructType>()) {
-      element.type =
-          get_struct_type_with_data_layout(struct_type, layout).first;
+      element.type = get_struct_type_with_data_layout(struct_type, layout).first;
     }
   }
   auto struct_layout = data_layout->getStructLayout(llvm_struct_type);
   for (int i = 0; i < elements.size(); i++) {
     elements[i].offset = struct_layout->getElementOffset(i);
   }
-  return {TypeFactory::get_instance()
-              .get_struct_type(elements, layout)
-              ->cast<StructType>(),
-          struct_size};
+  return {TypeFactory::get_instance().get_struct_type(elements, layout)->cast<StructType>(), struct_size};
 }
 
 QD_REGISTER_TASK(make_slim_libdevice);
