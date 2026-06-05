@@ -149,6 +149,12 @@ void KernelLauncher::launch_offloaded_tasks(LaunchContextBuilder &ctx,
   // `task_index` is the 0-based slot in `resolved_funcs`. First-launch miss falls through to `lookup_function`,
   // subsequent launches reuse the cached pointer. `AMDGPUContext::launch` dispatches on the context's current
   // (thread-local) stream, so the stream-parallel path below just swaps the active stream around each launch.
+  //
+  // Hoist the kernarg vectors out of the per-task launch. Passing `{kernarg_payload}` / `{kernarg_size}` as
+  // initializer lists constructs a fresh `std::vector` (heap alloc + free) on every dispatch; on the Genesis
+  // forward-only hot path that is ~100 launches/step of pure allocator churn. Build them once and reuse.
+  std::vector<void *> arg_ptrs{kernarg_payload};
+  const std::vector<int> arg_sizes{kernarg_size};
   auto launch_task = [&](std::size_t task_index, const OffloadedTask &task, int effective_grid_dim) {
     QD_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, effective_grid_dim, task.block_dim);
     void *func = resolved_funcs[task_index];
@@ -156,8 +162,8 @@ void KernelLauncher::launch_offloaded_tasks(LaunchContextBuilder &ctx,
       func = amdgpu_module->lookup_function(task.name);
       resolved_funcs[task_index] = func;
     }
-    AMDGPUContext::get_instance().launch(func, task.name, {kernarg_payload}, {kernarg_size}, effective_grid_dim,
-                                         task.block_dim, task.dynamic_shared_array_bytes);
+    AMDGPUContext::get_instance().launch(func, task.name, arg_ptrs, arg_sizes, effective_grid_dim, task.block_dim,
+                                         task.dynamic_shared_array_bytes);
   };
 
   auto *active_stream = AMDGPUContext::get_instance().get_stream();
@@ -433,10 +439,16 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
   QD_TRACE("Launching kernel");
   // Persistent scratch: no per-launch free for arg_buffer. The scratch lives until the launcher is destroyed.
   if (ctx.result_buffer_size > 0) {
-    AMDGPUDriver::get_instance().memcpy_device_to_host(host_result_buffer, device_result_buffer,
-                                                       ctx.result_buffer_size);
+    // Async D2H so we don't force a host stall after every kernel. The host_result_buffer is consumed later by the
+    // caller, which is expected to synchronize when it actually needs the value. A blocking copy here serializes the
+    // GPU pipeline on every value-returning launch (the Genesis RL hot path) and is a large throughput regression.
+    AMDGPUDriver::get_instance().memcpy_device_to_host_async(host_result_buffer, device_result_buffer,
+                                                             ctx.result_buffer_size, nullptr);
   }
   if (transfers.size()) {
+    // External-array round-trip path: we must wait for the kernel and the async D2H above before reading the data
+    // back into the host buffers.
+    AMDGPUDriver::get_instance().stream_synchronize(nullptr);
     for (auto itr = transfers.begin(); itr != transfers.end(); itr++) {
       auto &idx = itr->first;
       auto arg_id = idx.arg_id;
