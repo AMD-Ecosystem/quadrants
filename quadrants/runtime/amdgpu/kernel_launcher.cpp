@@ -257,22 +257,6 @@ bool KernelLauncher::on_amdgpu_device(void *ptr) {
 
 void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) {
   QD_ASSERT(handle.get_launch_id() < contexts_.size());
-
-  // HIP graph fast path. Used when the kernel was declared `@qd.kernel(graph=True)` AND there is no `graph_do_while`
-  // arg. The `graph_do_while` case falls through to the regular streaming launch below, which handles it via
-  // `launch_offloaded_tasks_with_do_while` (host-side loop + DtoH of the counter ndarray each iteration). HIP exposes
-  // kernel-launch graph nodes but no conditional / while nodes today, so the CUDA fast path that builds a conditional
-  // graph cannot be ported. The `AmdgpuDefaultStreamPinGuard` further down is skipped on this branch; that's fine
-  // because `graph_launch` enqueues a single op on the active stream and there are no recursive launches to reorder.
-  if (ctx.use_graph && ctx.graph_do_while_arg_id < 0) {
-    auto &lctx = contexts_[handle.get_launch_id()];
-    if (graph_manager_.try_launch(handle.get_launch_id(), ctx, lctx.jit_module, *lctx.parameters, lctx.offloaded_tasks,
-                                  get_runtime_executor())) {
-      return;
-    }
-  }
-  graph_manager_.mark_not_used();
-
   // Mutable reference: per-handle persistent buffers are lazy-allocated / grow on demand on the first launch of
   // each kernel. Recursive launches from `publish_adstack_metadata`'s host-eval (snode-reader kernels) hit a
   // *different* handle's `Context` and so cannot clobber the parent's `arg_buffer_dev_ptr` / `runtime_context_dev_ptr`.
@@ -297,25 +281,6 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
   // Change from std::vector<int> to ArgArrayPtrKey
   std::unordered_map<ArgArrayPtrKey, std::pair<void *, DeviceAllocation>, ArgArrayPtrKeyHasher> transfers;
   std::unordered_map<ArgArrayPtrKey, void *, ArgArrayPtrKeyHasher> device_ptrs;
-
-  auto *active_stream = AMDGPUContext::get_instance().get_stream();
-
-  // Default-stream fast path: every HtoD / DtoH / kernel-dispatch in this launcher already routes through
-  // `active_stream`, so when entry `stream_ == nullptr` AND every offloaded task launches on the same `active_stream`
-  // (i.e. `stream_parallel_group_id == 0`), the entire chain serialises on the legacy default stream. The
-  // `stream_synchronize` barriers between phases collapse to no-ops the surrounding sync DtoH (host-blocking on
-  // pageable host memory) already drains, and the `AmdgpuDefaultStreamPinGuard` re-pins `AMDGPUContext::stream_` to
-  // nullptr defensively across the launch in case an inner helper temporarily swaps it. Outside the fast path -
-  // user-supplied stream OR any task on `stream_parallel_group_id != 0` (per-group acquired streams differ from
-  // `active_stream`) - the cross-stream barriers below are load-bearing for HtoD / kernel / DtoH visibility and the
-  // pin guard would silently override the user-requested stream at the kernel-launch site, so the guard stays
-  // disengaged and main's sync semantics remain untouched. Symmetric with the CUDA launcher; the pre-Ampere pool
-  // fault that motivated the CUDA pin has not been observed on AMDGPU, but `AMDGPUContext::launch` now forwards
-  // `stream_` to `hipModuleLaunchKernel` so the same same-stream-invariant rationale applies.
-  const bool all_sgid_zero = std::all_of(offloaded_tasks.begin(), offloaded_tasks.end(),
-                                         [](const OffloadedTask &t) { return t.stream_parallel_group_id == 0; });
-  const bool default_stream_path = (active_stream == nullptr) && all_sgid_zero;
-  AmdgpuDefaultStreamPinGuard amdgpu_pin(/*engage=*/default_stream_path);
 
   char *device_result_buffer{nullptr};
   // Here we have to guarantee the result_result_buffer isn't nullptr
@@ -363,16 +328,14 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
           device_ptrs[data_ptr_idx] = executor->get_device_alloc_info_ptr(devalloc);
           transfers[data_ptr_idx] = {data_ptr, devalloc};
 
-          AMDGPUDriver::get_instance().memcpy_host_to_device_async((void *)device_ptrs[data_ptr_idx], data_ptr, arr_sz,
-                                                                   active_stream);
+          AMDGPUDriver::get_instance().memcpy_host_to_device((void *)device_ptrs[data_ptr_idx], data_ptr, arr_sz);
           if (grad_ptr != nullptr) {
             DeviceAllocation grad_devalloc =
                 executor->allocate_memory_on_device(arr_sz, (uint64 *)device_result_buffer);
             device_ptrs[grad_ptr_idx] = executor->get_device_alloc_info_ptr(grad_devalloc);
             transfers[grad_ptr_idx] = {grad_ptr, grad_devalloc};
 
-            AMDGPUDriver::get_instance().memcpy_host_to_device_async((void *)device_ptrs[grad_ptr_idx], grad_ptr,
-                                                                     arr_sz, active_stream);
+            AMDGPUDriver::get_instance().memcpy_host_to_device((void *)device_ptrs[grad_ptr_idx], grad_ptr, arr_sz);
           } else {
             device_ptrs[grad_ptr_idx] = nullptr;
           }
@@ -401,39 +364,27 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
       }
     }
   }
-  // On the default-stream fast path the post-HtoD `stream_synchronize` is redundant: HtoD goes on the null stream and
-  // the subsequent `amdgpu_module->launch` reads `AMDGPUContext::stream_` (pinned to nullptr) so the kernel dispatch
-  // serialises with the HtoD by null-stream ordering. Outside the fast path the barrier remains load-bearing because
-  // HtoD on `active_stream` is async and per-group launches read it from a different stream.
-  if (transfers.size() > 0 && !default_stream_path) {
-    AMDGPUDriver::get_instance().stream_synchronize(active_stream);
+  if (transfers.size() > 0) {
+    AMDGPUDriver::get_instance().stream_synchronize(nullptr);
   }
   char *host_result_buffer = (char *)ctx.get_context().result_buffer;
   if (ctx.result_buffer_size > 0) {
+    // Malloc_Async and Free_Async are available after ROCm 5.4
     ctx.get_context().result_buffer = (uint64 *)device_result_buffer;
   }
-  // Same explicit-stream race avoidance as the CUDA launcher: when active_stream != nullptr, allocate per-call
-  // ephemeral buffers so concurrent launches on different streams can't clobber each other.
-  const bool use_persistent_scratch = (active_stream == nullptr);
   char *device_arg_buffer = nullptr;
-  void *ephemeral_arg_buffer = nullptr;
   if (ctx.arg_buffer_size > 0) {
-    if (use_persistent_scratch) {
-      if (ctx.arg_buffer_size > launcher_ctx.arg_buffer_capacity) {
-        if (launcher_ctx.arg_buffer_dev_ptr != nullptr) {
-          AMDGPUDriver::get_instance().mem_free_async(launcher_ctx.arg_buffer_dev_ptr, nullptr);
-        }
-        const std::size_t new_cap = std::max<std::size_t>(ctx.arg_buffer_size, 2 * launcher_ctx.arg_buffer_capacity);
-        AMDGPUDriver::get_instance().malloc_async(&launcher_ctx.arg_buffer_dev_ptr, new_cap, nullptr);
-        launcher_ctx.arg_buffer_capacity = new_cap;
+    if (ctx.arg_buffer_size > launcher_ctx.arg_buffer_capacity) {
+      if (launcher_ctx.arg_buffer_dev_ptr != nullptr) {
+        AMDGPUDriver::get_instance().mem_free_async(launcher_ctx.arg_buffer_dev_ptr, nullptr);
       }
-      device_arg_buffer = static_cast<char *>(launcher_ctx.arg_buffer_dev_ptr);
-    } else {
-      AMDGPUDriver::get_instance().malloc_async(&ephemeral_arg_buffer, ctx.arg_buffer_size, active_stream);
-      device_arg_buffer = static_cast<char *>(ephemeral_arg_buffer);
+      const std::size_t new_cap = std::max<std::size_t>(ctx.arg_buffer_size, 2 * launcher_ctx.arg_buffer_capacity);
+      AMDGPUDriver::get_instance().malloc_async(&launcher_ctx.arg_buffer_dev_ptr, new_cap, nullptr);
+      launcher_ctx.arg_buffer_capacity = new_cap;
     }
+    device_arg_buffer = static_cast<char *>(launcher_ctx.arg_buffer_dev_ptr);
     AMDGPUDriver::get_instance().memcpy_host_to_device_async(device_arg_buffer, ctx.get_context().arg_buffer,
-                                                             ctx.arg_buffer_size, active_stream);
+                                                             ctx.arg_buffer_size, nullptr);
     ctx.get_context().arg_buffer = device_arg_buffer;
   }
   // Kernarg-by-value path (AMDGPU's `kernel_argument_struct_in_kernarg() == true` codegen): the kernel signature
@@ -480,50 +431,22 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
                            kernarg_size, device_runtime_context_ptr_for_adstack);
   }
   QD_TRACE("Launching kernel");
-  // Persistent scratch (default-stream path): no per-launch free for the per-handle `arg_buffer` / `runtime_context`
-  // or the launcher-global `result_buffer`. All live until launcher destruction; the dtor handles the final
-  // `mem_free_async`.  Ephemeral buffers (explicit-stream path) are freed below.
+  // Persistent scratch: no per-launch free for arg_buffer. The scratch lives until the launcher is destroyed.
   if (ctx.result_buffer_size > 0) {
-    AMDGPUDriver::get_instance().memcpy_device_to_host_async(host_result_buffer, device_result_buffer,
-                                                             ctx.result_buffer_size, active_stream);
+    AMDGPUDriver::get_instance().memcpy_device_to_host(host_result_buffer, device_result_buffer,
+                                                       ctx.result_buffer_size);
   }
-  // Copy data back to host. On the default-stream fast path the kernel ran on the null stream, so a sync
-  // `hipMemcpyDtoH` (host-blocking, on null stream) sees the kernel's writes without an explicit cross-stream barrier
-  // and host-drains the prior async `memcpy_device_to_host_async(host_result_buffer, ...)` queued on the same null
-  // stream - the explicit `stream_synchronize(nullptr)` calls collapse to no-ops. Outside the fast path the barriers
-  // remain load-bearing for cross-stream visibility (per-group kernel writes vs `active_stream` DtoH).
-  if (transfers.size() > 0) {
-    if (!default_stream_path) {
-      AMDGPUDriver::get_instance().stream_synchronize(active_stream);
-    }
+  if (transfers.size()) {
     for (auto itr = transfers.begin(); itr != transfers.end(); itr++) {
       auto &idx = itr->first;
-      if (default_stream_path) {
-        AMDGPUDriver::get_instance().memcpy_device_to_host(itr->second.first, (void *)device_ptrs[idx],
-                                                           ctx.array_runtime_sizes[idx.arg_id]);
-      } else {
-        AMDGPUDriver::get_instance().memcpy_device_to_host_async(itr->second.first, (void *)device_ptrs[idx],
-                                                                 ctx.array_runtime_sizes[idx.arg_id], active_stream);
-      }
-    }
-    if (!default_stream_path) {
-      AMDGPUDriver::get_instance().stream_synchronize(active_stream);
-    }
-    for (auto itr = transfers.begin(); itr != transfers.end(); itr++) {
+      auto arg_id = idx.arg_id;
+      AMDGPUDriver::get_instance().memcpy_device_to_host(itr->second.first, (void *)device_ptrs[idx],
+                                                         ctx.array_runtime_sizes[arg_id]);
       executor->deallocate_memory_on_device(itr->second.second);
     }
-  } else if (ctx.result_buffer_size > 0 && !default_stream_path) {
-    AMDGPUDriver::get_instance().stream_synchronize(active_stream);
   }
   // Persistent scratch: no per-launch free for the per-handle `arg_buffer` / `runtime_context` or the launcher-global
   // `result_buffer`. All three live until the launcher is destroyed; the dtor handles the final `mem_free_async`.
-  // Ephemeral buffers (explicit-stream path) are freed here.
-  if (ephemeral_arg_buffer != nullptr) {
-    AMDGPUDriver::get_instance().mem_free_async(ephemeral_arg_buffer, active_stream);
-  }
-  if (ephemeral_context_ptr != nullptr) {
-    AMDGPUDriver::get_instance().mem_free_async(ephemeral_context_ptr, active_stream);
-  }
 }
 
 KernelLauncher::~KernelLauncher() {

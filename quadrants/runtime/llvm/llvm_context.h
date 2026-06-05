@@ -125,6 +125,9 @@ class QuadrantsLLVMContext {
 
   static llvm::DataLayout get_data_layout(Arch arch);
 
+  // Public: the AMDGPU codegen reads this from outside the class to drive its per-kernel force-inline heuristic.
+  static int num_instructions(llvm::Function *func);
+
  private:
   std::unique_ptr<llvm::Module> clone_module_to_context(llvm::Module *module, llvm::LLVMContext *target_context);
 
@@ -133,8 +136,6 @@ class QuadrantsLLVMContext {
   void link_module_with_cuda_libdevice(std::unique_ptr<llvm::Module> &module);
 
   void link_module_with_amdgpu_libdevice(std::unique_ptr<llvm::Module> &module);
-
-  static int num_instructions(llvm::Function *func);
 
   void insert_nvvm_annotation(llvm::Function *func, std::string key, int val);
 
