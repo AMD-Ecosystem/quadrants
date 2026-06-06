@@ -10,6 +10,7 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 #include "llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h"
@@ -523,6 +524,54 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(const std::
         function_pass_manager.run(*func);
       }
       function_pass_manager.doFinalization();
+
+      // Remove host (x86) optimization-barrier inline asm that leaks into the retargeted module.
+      //
+      // runtime.cpp is compiled by the host x86_64 clang front-end and only retargeted to amdgcn
+      // here (see the `block_barrier` / fence comment below, and the note at `amdgcn_fence`).
+      // Optimization-barrier asm such as `amdgpu_cross_half_shuffle_i32`'s
+      // `__asm__ volatile("" : "+v"(byte))` is emitted with an empty asm body plus the
+      // `~{dirflag},~{fpsr},~{flags}` clobbers that clang unconditionally attaches to every
+      // GCC-style asm on x86. Those clobbers name x86 registers that do not exist on AMDGPU, and the
+      // empty-body INLINEASM itself drives the AMDGCN backend into a crash inside
+      // `SIInstrInfo::getInstSizeInBytes` during HSACO emission (the IR verifies fine, so this is
+      // invisible until codegen). The barrier only exists to keep `byte` per-lane so a real
+      // `ds_bpermute` is issued for a compile-time-constant target lane; on every wave64 target we
+      // ship (gfx90a/gfx942 CDNA, gfx11+ RDNA3) `ds_bpermute` already addresses the full wave, so
+      // the hint is a no-op and dropping it is safe (matches the existing AArch64 build, which never
+      // emits it). For an empty-body asm with the value tied through (`"=v,0"` / `"+v"`), forward
+      // the input to all users; for a side-effect-only empty barrier, just delete it.
+      {
+        llvm::SmallVector<llvm::CallBase *, 8> dead_asm;
+        for (auto &F : *module) {
+          for (auto &BB : F) {
+            for (auto &I : BB) {
+              auto *call = llvm::dyn_cast<llvm::CallBase>(&I);
+              if (call == nullptr || !call->isInlineAsm()) {
+                continue;
+              }
+              auto *asm_val = llvm::dyn_cast<llvm::InlineAsm>(call->getCalledOperand());
+              if (asm_val == nullptr || !asm_val->getAsmString().empty()) {
+                continue;  // only neutralize empty-body barriers; leave real asm untouched
+              }
+              if (!call->getType()->isVoidTy()) {
+                // Value barrier: result is the (tied) first operand. Forward it so the def has no
+                // users before we erase the call.
+                if (call->arg_size() >= 1 && call->getArgOperand(0)->getType() == call->getType()) {
+                  call->replaceAllUsesWith(call->getArgOperand(0));
+                } else {
+                  continue;  // unexpected shape; don't risk it
+                }
+              }
+              dead_asm.push_back(call);
+            }
+          }
+        }
+        for (auto *call : dead_asm) {
+          call->eraseFromParent();
+        }
+      }
+
       patch_intrinsic("thread_idx", llvm::Intrinsic::amdgcn_workitem_id_x);
       patch_intrinsic("block_thread_idx", llvm::Intrinsic::amdgcn_workitem_id_x);
       patch_intrinsic("block_idx", llvm::Intrinsic::amdgcn_workgroup_id_x);
@@ -576,12 +625,25 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(const std::
       // have to pass the explicit ``i32`` type alongside the ID -- otherwise ``CreateIntrinsic`` segfaults inside
       // ``getDeclaration()`` while resolving the mangled name.
       auto mcpu_str = AMDGPUContext::get_instance().get_mcpu();
-      bool has_permlane64 = (mcpu_str == "gfx940" || mcpu_str == "gfx941" || mcpu_str == "gfx942" ||
-                             mcpu_str.substr(0, 5) == "gfx11" || mcpu_str.substr(0, 5) == "gfx12");
-      // Escape hatch for validating the LDS software emulation on hardware that natively supports
-      // ``v_permlane64_b32``: setting ``QD_AMDGPU_FORCE_PERMLANE64_FALLBACK=1`` forces the JIT to take the LDS path
-      // even on gfx11+ / gfx940+, so we can exercise the fallback on a working AMD box (gfx1100 / gfx942) without
-      // needing a gfx10.x runner.  Has no effect on non-AMDGPU backends.
+      // ``v_permlane64_b32`` (the native single-instruction cross-half swap) is only ISA-available on
+      // gfx940+ (CDNA3) and gfx11+ (RDNA3+).
+      const bool hw_has_permlane64 = (mcpu_str == "gfx940" || mcpu_str == "gfx941" || mcpu_str == "gfx942" ||
+                                      mcpu_str.substr(0, 5) == "gfx11" || mcpu_str.substr(0, 5) == "gfx12");
+      // Default to the LDS-roundtrip software emulation on EVERY target. Lowering the native
+      // ``llvm.amdgcn.permlane64`` intrinsic crashes the bundled LLVM 22.1.0 AMDGPU backend inside
+      // ``SIInstrInfo::getInstSizeInBytes`` during HSACO emission -- reproduced on gfx942 / MI300X, where any
+      // kernel that reaches ``amdgpu_cross_half_shuffle_i32`` (e.g. the subgroup ``block.reduce`` used by the
+      // rigid constraint solver) segfaults at JIT-compile time. The emulation produces identical results, so
+      // this is correctness-preserving; it only trades the single ``v_permlane64_b32`` for an LDS roundtrip on
+      // cross-half shuffles. ``QD_AMDGPU_USE_NATIVE_PERMLANE64=1`` re-enables the native instruction (to
+      // re-validate the native path once the backend bug is fixed); ``QD_AMDGPU_FORCE_PERMLANE64_FALLBACK`` is
+      // now the default but is still honored for back-compat.
+      bool has_permlane64 = false;
+      if (const char *use_native = std::getenv("QD_AMDGPU_USE_NATIVE_PERMLANE64")) {
+        if (use_native[0] == '1') {
+          has_permlane64 = hw_has_permlane64;
+        }
+      }
       if (const char *force_fallback = std::getenv("QD_AMDGPU_FORCE_PERMLANE64_FALLBACK")) {
         if (force_fallback[0] == '1') {
           has_permlane64 = false;
