@@ -188,8 +188,7 @@ void export_lang(py::module &m) {
       .def_readwrite("cpu_block_dim_adaptive", &CompileConfig::cpu_block_dim_adaptive)
       .def_readwrite("default_gpu_block_dim", &CompileConfig::default_gpu_block_dim)
       .def_readwrite("gpu_max_reg", &CompileConfig::gpu_max_reg)
-      .def_readwrite("amdgpu_auto_waves_per_eu",
-                     &CompileConfig::amdgpu_auto_waves_per_eu)
+      .def_readwrite("amdgpu_auto_waves_per_eu", &CompileConfig::amdgpu_auto_waves_per_eu)
       .def_readwrite("saturating_grid_dim", &CompileConfig::saturating_grid_dim)
       .def_readwrite("max_block_dim", &CompileConfig::max_block_dim)
       .def_readwrite("cpu_max_num_threads", &CompileConfig::cpu_max_num_threads)
@@ -548,24 +547,19 @@ void export_lang(py::module &m) {
       .def("to_string", &Kernel::to_string)
       .def("set_fn_attrs",
            [](Kernel *self,
-              const std::unordered_map<
-                  std::string, std::unordered_map<std::string, std::string>>
-                  &fn_attrs) {
+              const std::unordered_map<std::string, std::unordered_map<std::string, std::string>> &fn_attrs) {
              const auto &registry = get_fn_attrs_registry();
              for (const auto &backend_kv : fn_attrs) {
                const auto reg_it = registry.find(backend_kv.first);
                if (reg_it == registry.end()) {
-                 throw std::invalid_argument(
-                     "Unknown fn_attrs backend: '" + backend_kv.first +
-                     "'. See quadrants/program/fn_attrs_registry.h.");
+                 throw std::invalid_argument("Unknown fn_attrs backend: '" + backend_kv.first +
+                                             "'. See quadrants/program/fn_attrs_registry.h.");
                }
                const auto &allowed = reg_it->second;
                for (const auto &attr_kv : backend_kv.second) {
                  if (!allowed.count(attr_kv.first)) {
-                   throw std::invalid_argument(
-                       "Unknown " + backend_kv.first + " fn_attr: '" +
-                       attr_kv.first +
-                       "'. See quadrants/program/fn_attrs_registry.h.");
+                   throw std::invalid_argument("Unknown " + backend_kv.first + " fn_attr: '" + attr_kv.first +
+                                               "'. See quadrants/program/fn_attrs_registry.h.");
                  }
                }
              }

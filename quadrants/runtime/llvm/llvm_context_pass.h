@@ -125,16 +125,12 @@ struct AMDGPUFlatToGlobalLoadStorePass : public FunctionPass {
   AMDGPUFlatToGlobalLoadStorePass() : FunctionPass(ID) {
   }
 
-  static bool originatesFromScratch(
-      llvm::Value *ptr,
-      llvm::SmallPtrSetImpl<llvm::Value *> &Visited) {
+  static bool originatesFromScratch(llvm::Value *ptr, llvm::SmallPtrSetImpl<llvm::Value *> &Visited) {
     auto *origin = ptr->stripPointerCasts();
     if (!Visited.insert(origin).second)
       return false;  // already on the walk path — break the cycle
     {
-      unsigned originAS = origin->getType()->isPointerTy()
-                              ? origin->getType()->getPointerAddressSpace()
-                              : 0;
+      unsigned originAS = origin->getType()->isPointerTy() ? origin->getType()->getPointerAddressSpace() : 0;
       if (originAS != 0 && originAS != 1)
         return true;
     }
@@ -153,8 +149,7 @@ struct AMDGPUFlatToGlobalLoadStorePass : public FunctionPass {
           return true;
     }
     if (auto *Sel = llvm::dyn_cast<llvm::SelectInst>(origin)) {
-      if (originatesFromScratch(Sel->getTrueValue(), Visited) ||
-          originatesFromScratch(Sel->getFalseValue(), Visited))
+      if (originatesFromScratch(Sel->getTrueValue(), Visited) || originatesFromScratch(Sel->getFalseValue(), Visited))
         return true;
     }
     if (auto *Arg = llvm::dyn_cast<llvm::Argument>(origin)) {
@@ -195,25 +190,21 @@ struct AMDGPUFlatToGlobalLoadStorePass : public FunctionPass {
       std::vector<llvm::Instruction *> to_convert;
       for (auto &I : BB) {
         if (auto *LI = llvm::dyn_cast<llvm::LoadInst>(&I)) {
-          if (LI->getPointerAddressSpace() == 0 &&
-              !originatesFromScratch(LI->getPointerOperand()))
+          if (LI->getPointerAddressSpace() == 0 && !originatesFromScratch(LI->getPointerOperand()))
             to_convert.push_back(LI);
         } else if (auto *SI = llvm::dyn_cast<llvm::StoreInst>(&I)) {
-          if (SI->getPointerAddressSpace() == 0 &&
-              !originatesFromScratch(SI->getPointerOperand()))
+          if (SI->getPointerAddressSpace() == 0 && !originatesFromScratch(SI->getPointerOperand()))
             to_convert.push_back(SI);
         }
       }
       for (auto *I : to_convert) {
         llvm::IRBuilder<> B(I);
         if (auto *LI = llvm::dyn_cast<llvm::LoadInst>(I)) {
-          auto *cast =
-              B.CreateAddrSpaceCast(LI->getPointerOperand(), ptr_global_ty);
+          auto *cast = B.CreateAddrSpaceCast(LI->getPointerOperand(), ptr_global_ty);
           LI->setOperand(LI->getPointerOperandIndex(), cast);
           modified = true;
         } else if (auto *SI = llvm::dyn_cast<llvm::StoreInst>(I)) {
-          auto *cast =
-              B.CreateAddrSpaceCast(SI->getPointerOperand(), ptr_global_ty);
+          auto *cast = B.CreateAddrSpaceCast(SI->getPointerOperand(), ptr_global_ty);
           SI->setOperand(SI->getPointerOperandIndex(), cast);
           modified = true;
         }
