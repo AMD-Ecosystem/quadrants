@@ -21,24 +21,18 @@ struct CacheCleanerUtils<PtxCacheAllData> {
   using MetadataType = PtxCacheAllData;
 
   // To save metadata as file
-  static bool save_metadata(const CacheCleanerConfig &config,
-                            const MetadataType &data) {
-    write_to_binary_file(
-        data, quadrants::join_path(config.path, config.metadata_filename));
+  static bool save_metadata(const CacheCleanerConfig &config, const MetadataType &data) {
+    write_to_binary_file(data, quadrants::join_path(config.path, config.metadata_filename));
     return true;
   }
 
-  static bool save_debugging_metadata(const CacheCleanerConfig &config,
-                                      const MetadataType &data) {
+  static bool save_debugging_metadata(const CacheCleanerConfig &config, const MetadataType &data) {
     return true;
   }
 
   // To get cache files name
-  static std::vector<std::string> get_cache_files(
-      const CacheCleanerConfig &config,
-      const WrappedPtx &wrappedPtx) {
-    auto fn = fmt::format(PtxCache::kCacheFilenameFormat,
-                          wrappedPtx.metadata.cache_key);
+  static std::vector<std::string> get_cache_files(const CacheCleanerConfig &config, const WrappedPtx &wrappedPtx) {
+    auto fn = fmt::format(PtxCache::kCacheFilenameFormat, wrappedPtx.metadata.cache_key);
     return {fn};
   }
 
@@ -48,8 +42,7 @@ struct CacheCleanerUtils<PtxCacheAllData> {
   }
 
   // To check if a file is cache file
-  static bool is_valid_cache_file(const CacheCleanerConfig &config,
-                                  const std::string &name) {
+  static bool is_valid_cache_file(const CacheCleanerConfig &config, const std::string &name) {
     std::string ext = filename_extension(name);
     return ext == kPtxCacheFilenameExt;
   }
@@ -57,17 +50,15 @@ struct CacheCleanerUtils<PtxCacheAllData> {
 
 }  // namespace offline_cache
 
-PtxCache::PtxCache(const Config config,
-                   const CompileConfig &compile_config,
-                   int compute_capability)
+PtxCache::PtxCache(const Config config, const CompileConfig &compile_config, int compute_capability)
     : config_(std::move(config)),
       compile_config_(compile_config),
       compute_capability_(compute_capability),
-      cache_dir_(
-          join_path(config_.offline_cache_path,
-                    fmt::format("ptx_cache_sm_{}", compute_capability_))) {
-  QD_DEBUG("Create ptxcache with offline_cache_file_path = {}",
-           this->cache_dir_);
+      cache_dir_(join_path(config_.offline_cache_path, fmt::format("ptx_cache_sm_{}", compute_capability_))) {
+  QD_DEBUG("Create ptxcache with offline_cache_file_path = {}", this->cache_dir_);
+  if (get_cache_mode(compile_config_) != CacheMode::MemAndDiskCache) {
+    return;
+  }
   auto filepath = join_path(this->cache_dir_, kMetadataFilename);
   auto lock_path = join_path(this->cache_dir_, kMetadataLockName);
   if (path_exists(filepath)) {
@@ -75,15 +66,17 @@ PtxCache::PtxCache(const Config config,
       auto _ = make_unlocker(lock_path);
       offline_cache::load_metadata_with_checking(cached_all_data_, filepath);
     } else {
-      QD_WARN(
-          "Lock {} failed. Please run 'ti cache clean -p {}' and try again.",
-          lock_path, this->cache_dir_);
+      QD_WARN("Lock {} failed. Please run 'ti cache clean -p {}' and try again.", lock_path, this->cache_dir_);
     }
   }
 }
 
 void PtxCache::dump() {
   if (wrapped_by_key_.empty()) {
+    return;
+  }
+  if (get_cache_mode(compile_config_) != CacheMode::MemAndDiskCache) {
+    wrapped_by_key_.clear();
     return;
   }
 
@@ -94,8 +87,7 @@ void PtxCache::dump() {
   auto lock_path = join_path(cache_dir_, kMetadataLockName);
 
   if (!lock_with_file(lock_path)) {
-    QD_WARN("Lock {} failed. Please run 'ti cache clean -p {}' and try again.",
-            lock_path, cache_dir_);
+    QD_WARN("Lock {} failed. Please run 'ti cache clean -p {}' and try again.", lock_path, cache_dir_);
     wrapped_by_key_.clear();  // Ignore the caching kernels
     return;
   }
@@ -118,8 +110,7 @@ void PtxCache::dump() {
   // Add new data
   for (auto &[kernel_key, wrapped] : wrapped_by_key_) {
     if (wrapped.metadata.cache_mode == CacheMode::MemAndDiskCache) {
-      auto [iter, ok] =
-          dataWrapperByCacheKey.insert({kernel_key, std::move(wrapped)});
+      auto [iter, ok] = dataWrapperByCacheKey.insert({kernel_key, std::move(wrapped)});
       QD_ASSERT(!ok || iter->second.metadata.size == 0);
     }
   }
@@ -127,8 +118,7 @@ void PtxCache::dump() {
   // Dump cached CompiledKernelData to disk
   for (auto &[_, k] : dataWrapperByCacheKey) {
     if (!k.ptx.has_value()) {
-      QD_TRACE("PTX for cache_key {} is not set, skipping dump",
-               k.metadata.cache_key);
+      QD_TRACE("PTX for cache_key {} is not set, skipping dump", k.metadata.cache_key);
       continue;
     }
     QD_TRACE("Dumping PTX for cache_key {}", k.metadata.cache_key);
@@ -165,8 +155,7 @@ std::string PtxCache::make_filename(const std::string &kernel_key) const {
   return join_path(cache_dir_, fmt::format(kCacheFilenameFormat, kernel_key));
 }
 
-std::string PtxCache::make_cache_key(const std::string &llvm_ir,
-                                     bool use_fast_math) const {
+std::string PtxCache::make_cache_key(const std::string &llvm_ir, bool use_fast_math) const {
   picosha2::hash256_one_by_one hasher;
   std::string fast_math_str = use_fast_math ? "1" : "0";
   std::string sm_version_str = std::to_string(compute_capability_);
@@ -180,9 +169,7 @@ std::string PtxCache::make_cache_key(const std::string &llvm_ir,
   return res;
 }
 
-std::optional<std::string> PtxCache::try_load_cached(
-    const std::string &cache_key,
-    CacheMode cache_mode) {
+std::optional<std::string> PtxCache::try_load_cached(const std::string &cache_key, CacheMode cache_mode) {
   {
     // Find in memory-cache
     const auto &kernels = wrapped_by_key_;
@@ -210,16 +197,12 @@ std::optional<std::string> PtxCache::try_load_cached(
   return std::nullopt;
 }
 
-std::optional<std::string> PtxCache::load_data_from_disk(
-    const std::string &cache_key) {
+std::optional<std::string> PtxCache::load_data_from_disk(const std::string &cache_key) {
   const auto filename = make_filename(cache_key);
-  if (std::ifstream ifs(filename, std::ios::in | std::ios::binary);
-      ifs.is_open()) {
-    std::string ptx = std::string(std::istreambuf_iterator<char>(ifs),
-                                  std::istreambuf_iterator<char>());
+  if (std::ifstream ifs(filename, std::ios::in | std::ios::binary); ifs.is_open()) {
+    std::string ptx = std::string(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
     if (!ifs) {
-      QD_WARN(fmt::format("Failed to read PTX from file {}: {}", filename,
-                          std::strerror(errno)));
+      QD_WARN(fmt::format("Failed to read PTX from file {}: {}", filename, std::strerror(errno)));
       return std::nullopt;
     }
     QD_DEBUG("Loaded PTX from file {} (size: {} bytes)", filename, ptx.size());
@@ -229,8 +212,7 @@ std::optional<std::string> PtxCache::load_data_from_disk(
     }
     return ptx;
   }
-  QD_WARN(fmt::format("Failed to load ptx file {}: {}", filename,
-                      std::strerror(errno)));
+  QD_WARN(fmt::format("Failed to load ptx file {}: {}", filename, std::strerror(errno)));
   return std::nullopt;
 }
 
@@ -241,7 +223,7 @@ void PtxCache::store_ptx(const std::string &cache_key, const std::string &ptx) {
   k.metadata.cache_key = cache_key;
   k.metadata.created_at = k.metadata.last_used_at = std::time(nullptr);
   k.metadata.size = 0;  // Populate `size` within the PtxCache::dump()
-  k.metadata.cache_mode = CacheMode::MemAndDiskCache;
+  k.metadata.cache_mode = get_cache_mode(compile_config_);
   wrapped_by_key_[cache_key] = std::move(k);
 }
 
@@ -251,7 +233,7 @@ std::optional<std::string> PtxCache::load_ptx(const std::string &cache_key) {
 }
 
 CacheMode PtxCache::get_cache_mode(const CompileConfig &compile_config) {
-  return CacheMode::MemAndDiskCache;
+  return compile_config.offline_cache ? CacheMode::MemAndDiskCache : CacheMode::MemCache;
 }
 
 }  // namespace quadrants::lang

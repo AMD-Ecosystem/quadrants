@@ -13,19 +13,17 @@ namespace quadrants::lang {
 // honors it (for AMDGPU: codegen_llvm.cpp applies it via addFnAttr; if the
 // backend has a hardcoded default for the same key, gate that default with
 // `!F.hasFnAttribute(key)` in the corresponding jit_*.cpp).
-inline const std::unordered_map<std::string, std::unordered_set<std::string>> &
-get_fn_attrs_registry() {
-  static const std::unordered_map<std::string, std::unordered_set<std::string>>
-      kRegistry = {
-          {"amdgpu",
-           {
-               "amdgpu-max-num-workgroups",
-               "amdgpu-agpr-alloc",
-               "amdgpu-waves-per-eu",
-               "amdgpu-flat-work-group-size",
-               "amdgpu-sched-strategy",
-           }},
-      };
+inline const std::unordered_map<std::string, std::unordered_set<std::string>> &get_fn_attrs_registry() {
+  static const std::unordered_map<std::string, std::unordered_set<std::string>> kRegistry = {
+      {"amdgpu",
+       {
+           "amdgpu-max-num-workgroups",
+           "amdgpu-agpr-alloc",
+           "amdgpu-waves-per-eu",
+           "amdgpu-flat-work-group-size",
+           "amdgpu-sched-strategy",
+       }},
+  };
   return kRegistry;
 }
 

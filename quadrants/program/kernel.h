@@ -25,8 +25,7 @@ class QD_DLL_EXPORT Kernel : public Callable {
   // are validated against fn_attrs_registry.h. Each backend's codegen is
   // responsible for picking up its own entry; entries for inactive
   // backends are stored but unused.
-  std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
-      fn_attrs;
+  std::unordered_map<std::string, std::unordered_map<std::string, std::string>> fn_attrs;
 
   bool is_accessor{false};
 

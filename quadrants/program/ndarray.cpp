@@ -1,5 +1,6 @@
 #include <numeric>
 
+#include "quadrants/program/adstack_size_expr_eval.h"
 #include "quadrants/program/ndarray.h"
 #include "quadrants/program/program.h"
 #include "fp16.h"
@@ -13,8 +14,7 @@ namespace quadrants::lang {
 
 namespace {
 
-size_t flatten_index(const std::vector<int> &shapes,
-                     const std::vector<int> &indices) {
+size_t flatten_index(const std::vector<int> &shapes, const std::vector<int> &indices) {
   size_t ind = 0;
   for (int i = 0; i < indices.size(); i++) {
     ind = ind * shapes[i] + indices[i];
@@ -32,10 +32,9 @@ Ndarray::Ndarray(Program *prog,
       shape(shape_),
       layout(layout_),
       dbg_info(dbg_info_),
-      nelement_(std::accumulate(std::begin(shape_),
-                                std::end(shape_),
-                                (std::size_t)1,
-                                std::multiplies<>())),
+      // size_t accumulator: this fork plumbs i64 ndarray indexing through llvm codegen / ndarray nelement_,
+      // so the running total must stay 64-bit even on 32-bit-int hosts. See `e0ec4416a`.
+      nelement_(std::accumulate(std::begin(shape_), std::end(shape_), (std::size_t)1, std::multiplies<>())),
       element_size_(data_type_size(dtype)),
       prog_(prog) {
   // Now that we have two shapes which may be concatenated differently
@@ -43,14 +42,13 @@ Ndarray::Ndarray(Program *prog,
   total_shape_ = shape;
   auto element_shape = data_type_shape(dtype);
   if (layout == ExternalArrayLayout::kAOS) {
-    total_shape_.insert(total_shape_.end(), element_shape.begin(),
-                        element_shape.end());
+    total_shape_.insert(total_shape_.end(), element_shape.begin(), element_shape.end());
   } else if (layout == ExternalArrayLayout::kSOA) {
-    total_shape_.insert(total_shape_.begin(), element_shape.begin(),
-                        element_shape.end());
+    total_shape_.insert(total_shape_.begin(), element_shape.begin(), element_shape.end());
   }
-  ndarray_alloc_ = prog->allocate_memory_on_device(nelement_ * element_size_,
-                                                   prog->result_buffer);
+  // i32-overflow warning intentionally dropped: codegen widens shape entries to i64 (see
+  // `codegen_llvm.cpp`), so `nelement_ * element_size_` past `INT_MAX` works on AMDGPU.
+  ndarray_alloc_ = prog->allocate_memory_on_device(nelement_ * element_size_, prog->result_buffer);
 }
 
 Ndarray::Ndarray(DeviceAllocation &devalloc,
@@ -63,10 +61,7 @@ Ndarray::Ndarray(DeviceAllocation &devalloc,
       shape(shape),
       layout(layout),
       dbg_info(dbg_info),
-      nelement_(std::accumulate(std::begin(shape),
-                                std::end(shape),
-                                (std::size_t)1,
-                                std::multiplies<>())),
+      nelement_(std::accumulate(std::begin(shape), std::end(shape), (std::size_t)1, std::multiplies<>())),
       element_size_(data_type_size(dtype)) {
   // When element_shape is specified but layout is not, default layout is AOS.
   auto element_shape = data_type_shape(dtype);
@@ -77,11 +72,9 @@ Ndarray::Ndarray(DeviceAllocation &devalloc,
   // depending on layout, total_shape_ comes handy.
   total_shape_ = shape;
   if (layout == ExternalArrayLayout::kAOS) {
-    total_shape_.insert(total_shape_.end(), element_shape.begin(),
-                        element_shape.end());
+    total_shape_.insert(total_shape_.end(), element_shape.begin(), element_shape.end());
   } else if (layout == ExternalArrayLayout::kSOA) {
-    total_shape_.insert(total_shape_.begin(), element_shape.begin(),
-                        element_shape.end());
+    total_shape_.insert(total_shape_.begin(), element_shape.begin(), element_shape.end());
   }
 }
 
@@ -91,16 +84,16 @@ Ndarray::Ndarray(DeviceAllocation &devalloc,
                  const std::vector<int> &element_shape,
                  ExternalArrayLayout layout,
                  const DebugInfo &dbg_info)
-    : Ndarray(devalloc,
-              TypeFactory::create_tensor_type(element_shape, type),
-              shape,
-              layout,
-              dbg_info) {
+    : Ndarray(devalloc, TypeFactory::create_tensor_type(element_shape, type), shape, layout, dbg_info) {
   QD_ASSERT(type->is<PrimitiveType>());
 }
 
 Ndarray::~Ndarray() {
   if (prog_) {
+    // Drop any cached `ndarray_data_gen` entry keyed by `&ndarray_alloc_` before the holder address can be reused
+    // by a future Ndarray allocation. Without this, a new Ndarray that happens to occupy the same heap address
+    // would pick up the destroyed ndarray's last generation counter and could falsely match a cache snapshot.
+    prog_->adstack_cache().erase_ndarray_data_gen(const_cast<DeviceAllocation *>(&ndarray_alloc_));
     ndarray_alloc_.device->dealloc_memory(ndarray_alloc_);
   }
 }
@@ -136,6 +129,10 @@ std::size_t Ndarray::get_nelement() const {
 }
 
 TypedConstant Ndarray::read(const std::vector<int> &I) const {
+  // Surface any pending adstack overflow at this Quadrants Python entry. The internal `synchronize()`
+  // below drains the queue but does NOT raise; the explicit poll catches DLPack-bypass overflows from a
+  // previous launch within one entry of the offending kernel even when the user never calls `qd.sync()`.
+  prog_->check_adstack_overflow_and_assert();
   prog_->synchronize();
   size_t index = flatten_index(total_shape_, I);
   size_t size = data_type_size(get_element_data_type());
@@ -144,16 +141,13 @@ TypedConstant Ndarray::read(const std::vector<int> &I) const {
   alloc_params.host_read = true;
   alloc_params.size = size;
   alloc_params.usage = AllocUsage::Storage;
-  auto [staging_buf_, res] =
-      this->ndarray_alloc_.device->allocate_memory_unique(alloc_params);
+  auto [staging_buf_, res] = this->ndarray_alloc_.device->allocate_memory_unique(alloc_params);
   QD_ASSERT(res == RhiResult::success);
-  staging_buf_->device->memcpy_internal(
-      staging_buf_->get_ptr(),
-      this->ndarray_alloc_.get_ptr(/*offset=*/index * size), size);
+  staging_buf_->device->memcpy_internal(staging_buf_->get_ptr(), this->ndarray_alloc_.get_ptr(/*offset=*/index * size),
+                                        size);
 
   char *device_arr_ptr{nullptr};
-  QD_ASSERT(staging_buf_->device->map(
-                *staging_buf_, (void **)&device_arr_ptr) == RhiResult::success);
+  QD_ASSERT(staging_buf_->device->map(*staging_buf_, (void **)&device_arr_ptr) == RhiResult::success);
 
   TypedConstant data(get_element_data_type());
   std::memcpy(&data.value_bits, device_arr_ptr, size);
@@ -179,23 +173,23 @@ void Ndarray::write(const std::vector<int> &I, TypedConstant val) const {
   alloc_params.host_read = false;
   alloc_params.size = size_;
   alloc_params.usage = AllocUsage::Storage;
-  auto [staging_buf_, res] =
-      this->ndarray_alloc_.device->allocate_memory_unique(alloc_params);
+  auto [staging_buf_, res] = this->ndarray_alloc_.device->allocate_memory_unique(alloc_params);
   QD_ASSERT(res == RhiResult::success);
 
   char *device_arr_ptr{nullptr};
-  QD_ASSERT(staging_buf_->device->map(
-                *staging_buf_, (void **)&device_arr_ptr) == RhiResult::success);
+  QD_ASSERT(staging_buf_->device->map(*staging_buf_, (void **)&device_arr_ptr) == RhiResult::success);
 
   QD_ASSERT(device_arr_ptr);
   std::memcpy(device_arr_ptr, &val.value_bits, size_);
 
   staging_buf_->device->unmap(*staging_buf_);
-  staging_buf_->device->memcpy_internal(
-      this->ndarray_alloc_.get_ptr(index * size_), staging_buf_->get_ptr(),
-      size_);
+  staging_buf_->device->memcpy_internal(this->ndarray_alloc_.get_ptr(index * size_), staging_buf_->get_ptr(), size_);
 
   prog_->synchronize();
+  // Host-side mutation of the ndarray contents: bump the per-DeviceAllocation generation so any cached
+  // adstack-sizer metadata that depended on `ExternalTensorRead` of this ndarray is evicted on next launch.
+  // Keyed by the same `&ndarray_alloc_` the kernel launchers use in `bump_writes_for_kernel_*`.
+  prog_->adstack_cache().bump_ndarray_data_gen(const_cast<DeviceAllocation *>(&ndarray_alloc_));
 }
 
 int64 Ndarray::read_int(const std::vector<int> &i) {

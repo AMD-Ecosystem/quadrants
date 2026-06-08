@@ -17,16 +17,14 @@
 namespace quadrants {
 namespace lang {
 #if defined(QD_WITH_AMDGPU)
-JITModule *JITSessionAMDGPU ::add_module(std::unique_ptr<llvm::Module> M,
-                                         int max_reg) {
+JITModule *JITSessionAMDGPU ::add_module(std::unique_ptr<llvm::Module> M, int max_reg) {
   // HSACo caching
   auto cache_key = compute_module_cache_key(M.get());
   auto cache_it = hsaco_cache_.find(cache_key);
   if (cache_it != hsaco_cache_.end()) {
     QD_TRACE("HSACo cache hit for key {}", cache_key.substr(0, 16));
     void *amdgpu_module;
-    AMDGPUDriver::get_instance().module_load_data(&amdgpu_module,
-                                                  cache_it->second.c_str());
+    AMDGPUDriver::get_instance().module_load_data(&amdgpu_module, cache_it->second.c_str());
     modules.push_back(std::make_unique<JITModuleAMDGPU>(amdgpu_module));
     return modules.back().get();
   }
@@ -37,8 +35,7 @@ JITModule *JITSessionAMDGPU ::add_module(std::unique_ptr<llvm::Module> M,
   void *amdgpu_module;
   auto t = Time::get_time();
   AMDGPUDriver::get_instance().module_load_data(&amdgpu_module, hsaco.c_str());
-  QD_TRACE("AMDGPU load data from module time : {}ms",
-           (Time::get_time() - t) * 1000);
+  QD_TRACE("AMDGPU load data from module time : {}ms", (Time::get_time() - t) * 1000);
 
   hsaco_cache_[cache_key] = hsaco;
 
@@ -46,18 +43,15 @@ JITModule *JITSessionAMDGPU ::add_module(std::unique_ptr<llvm::Module> M,
   return modules.back().get();
 }
 
-std::string JITSessionAMDGPU::compile_module_to_hsaco(
-    std::unique_ptr<llvm::Module> &llvm_module) {
+std::string JITSessionAMDGPU::compile_module_to_hsaco(std::unique_ptr<llvm::Module> &llvm_module) {
   static std::once_flag amdgpu_cl_flags;
   std::call_once(amdgpu_cl_flags, [] {
     const char *args[] = {"quadrants", "-force-vector-interleave=8"};
     llvm::cl::ParseCommandLineOptions(2, args);
   });
 
-  llvm::legacy::FunctionPassManager function_pass_manager_addrcast(
-      llvm_module.get());
-  function_pass_manager_addrcast.add(
-      new AMDGPUConvertAllocaInstAddressSpacePass());
+  llvm::legacy::FunctionPassManager function_pass_manager_addrcast(llvm_module.get());
+  function_pass_manager_addrcast.add(new AMDGPUConvertAllocaInstAddressSpacePass());
   function_pass_manager_addrcast.doInitialization();
   for (auto func = llvm_module->begin(); func != llvm_module->end(); ++func)
     function_pass_manager_addrcast.run(*func);
@@ -75,22 +69,16 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
     if (F.getCallingConv() == llvm::CallingConv::AMDGPU_KERNEL) {
       const std::string kernel_name = F.getName().str();
       const bool is_lightweight_cg_subkernel =
-          kernel_name.find("_kernel_cg_only_save_prev_grad") !=
-              std::string::npos ||
-          kernel_name.find("_kernel_update_constraint_forces") !=
-              std::string::npos ||
-          kernel_name.find("_kernel_update_constraint_qfrc") !=
-              std::string::npos ||
-          kernel_name.find("_kernel_update_constraint_cost") !=
-              std::string::npos ||
-          kernel_name.find("_kernel_update_search_direction") !=
-              std::string::npos;
+          kernel_name.find("_kernel_cg_only_save_prev_grad") != std::string::npos ||
+          kernel_name.find("_kernel_update_constraint_forces") != std::string::npos ||
+          kernel_name.find("_kernel_update_constraint_qfrc") != std::string::npos ||
+          kernel_name.find("_kernel_update_constraint_cost") != std::string::npos ||
+          kernel_name.find("_kernel_update_search_direction") != std::string::npos;
 
       // Each default below is skipped if the kernel already carries that
       // attribute (set upstream in codegen_llvm.cpp from user-supplied
       // @qd.kernel(fn_attrs={...})). User values win.
-      if (!is_lightweight_cg_subkernel &&
-          !F.hasFnAttribute("amdgpu-waves-per-eu")) {
+      if (!is_lightweight_cg_subkernel && !F.hasFnAttribute("amdgpu-waves-per-eu")) {
         F.addFnAttr("amdgpu-waves-per-eu", "1,2");
       }
       if (!F.hasFnAttribute("uniform-work-group-size")) {
@@ -127,11 +115,9 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
       if (CB->getCalledOperand() != &F)
         continue;
       auto *Caller = CB->getFunction();
-      if (Caller &&
-          Caller->getCallingConv() == llvm::CallingConv::AMDGPU_KERNEL &&
+      if (Caller && Caller->getCallingConv() == llvm::CallingConv::AMDGPU_KERNEL &&
           Caller->hasFnAttribute("amdgpu-flat-work-group-size")) {
-        inherited = Caller->getFnAttribute("amdgpu-flat-work-group-size")
-                        .getValueAsString();
+        inherited = Caller->getFnAttribute("amdgpu-flat-work-group-size").getValueAsString();
         break;
       }
     }
@@ -142,9 +128,8 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
 
   auto *daz_type = llvm::Type::getInt8Ty(llvm_module->getContext());
   auto *daz_init = llvm::ConstantInt::get(daz_type, 1);
-  auto *daz_var = new llvm::GlobalVariable(
-      *llvm_module, daz_type, true, llvm::GlobalValue::LinkOnceODRLinkage,
-      daz_init, "__oclc_daz_opt");
+  auto *daz_var = new llvm::GlobalVariable(*llvm_module, daz_type, true, llvm::GlobalValue::LinkOnceODRLinkage,
+                                           daz_init, "__oclc_daz_opt");
   daz_var->setVisibility(llvm::GlobalValue::HiddenVisibility);
 
   if (llvm::verifyModule(*llvm_module, &llvm::errs())) {
@@ -154,9 +139,7 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   using namespace llvm;
 
   if (this->config_.print_kernel_llvm_ir) {
-    static FileSequenceWriter writer(
-        "quadrants_kernel_amdgpu_llvm_ir_{:04d}.ll",
-        "unoptimized LLVM IR (AMDGPU)");
+    static FileSequenceWriter writer("quadrants_kernel_amdgpu_llvm_ir_{:04d}.ll", "unoptimized LLVM IR (AMDGPU)");
     writer.write(llvm_module.get());
   }
   auto triple_str = llvm_module->getTargetTriple();
@@ -185,10 +168,15 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   options.NoZerosInBSS = 0;
   options.GuaranteedTailCallOpt = 0;
 
-  std::unique_ptr<llvm::TargetMachine> machine(target->createTargetMachine(
-      triple_str, AMDGPUContext::get_instance().get_mcpu(), "", options,
-      llvm::Reloc::PIC_, llvm::CodeModel::Small,
-      llvm::CodeGenOptLevel::Aggressive));
+  // Force wave64 codegen at the TargetMachine level. Belt-and-suspenders with the per-function target-features
+  // attribute set in llvm_context_pass.h: TargetMachine features supply the default when the IR doesn't pin one, and
+  // per-function attrs override per call. Both are needed because alloca-pass-cleared functions and freshly created
+  // kernel wrappers each take a different code path. Required so the same wave64 runtime works on RDNA (gfx10+) hosts
+  // in addition to CDNA.
+  const char *kAmdgpuFeatures = "+wavefrontsize64,-wavefrontsize32";
+  std::unique_ptr<llvm::TargetMachine> machine(
+      target->createTargetMachine(triple_str, AMDGPUContext::get_instance().get_mcpu(), kAmdgpuFeatures, options,
+                                  llvm::Reloc::PIC_, llvm::CodeModel::Small, llvm::CodeGenOptLevel::Aggressive));
 
   llvm_module->setDataLayout(machine->createDataLayout());
 
@@ -212,10 +200,8 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
     llvm::SmallString<0> gcnstr;
     llvm::raw_svector_ostream llvm_stream_gcn(gcnstr);
     std::unique_ptr<llvm::TargetMachine> machine_gen_gcn(
-        target->createTargetMachine(
-            triple_str, AMDGPUContext::get_instance().get_mcpu(), "", options,
-            llvm::Reloc::PIC_, llvm::CodeModel::Small,
-            llvm::CodeGenOptLevel::Aggressive));
+        target->createTargetMachine(triple_str, AMDGPUContext::get_instance().get_mcpu(), kAmdgpuFeatures, options,
+                                    llvm::Reloc::PIC_, llvm::CodeModel::Small, llvm::CodeGenOptLevel::Aggressive));
 
     // Replace PassManagerBuilder with PassBuilder API
     llvm::LoopAnalysisManager lam;
@@ -230,19 +216,15 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
     pb.registerLoopAnalyses(lam);
     pb.crossRegisterProxies(lam, fam, cgam, mam);
 
-    llvm::ModulePassManager mpm =
-        pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
+    llvm::ModulePassManager mpm = pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
     mpm.run(*module_clone, mam);
 
-    module_gen_gcn_pass_manager.add(llvm::createTargetTransformInfoWrapperPass(
-        machine_gen_gcn->getTargetIRAnalysis()));
-    machine_gen_gcn->addPassesToEmitFile(
-        module_gen_gcn_pass_manager, llvm_stream_gcn, nullptr,
-        llvm::CodeGenFileType::AssemblyFile, true);
+    module_gen_gcn_pass_manager.add(llvm::createTargetTransformInfoWrapperPass(machine_gen_gcn->getTargetIRAnalysis()));
+    machine_gen_gcn->addPassesToEmitFile(module_gen_gcn_pass_manager, llvm_stream_gcn, nullptr,
+                                         llvm::CodeGenFileType::AssemblyFile, true);
     module_gen_gcn_pass_manager.run(*module_clone);
     std::string gcn(gcnstr.begin(), gcnstr.end());
-    static FileSequenceWriter writer("quadrants_kernel_amdgcn_{:04d}.gcn",
-                                     "module AMDGCN");
+    static FileSequenceWriter writer("quadrants_kernel_amdgcn_{:04d}.gcn", "module AMDGCN");
     writer.write(gcn);
   }
 
@@ -263,8 +245,7 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   pb.registerLoopAnalyses(lam);
   pb.crossRegisterProxies(lam, fam, cgam, mam);
 
-  llvm::ModulePassManager mpm =
-      pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
+  llvm::ModulePassManager mpm = pb.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O3);
 
   // Run the new optimization pipeline
   mpm.run(*llvm_module, mam);
@@ -282,15 +263,27 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   // downstream of get_runtime() returning addrspace(0). Conservative walk
   // handles PHI/Select/AddrSpaceCast(srcAS=5)
   // and stops at LoadInst — secondary loads through GEPs ARE converted.
-  extra_fpm.add(new AMDGPUFlatToGlobalLoadStorePass());
+  //
+  // The pass is unsafe to run on the runtime bitcode: post-LLVM-22 the
+  // runtime module exposes complex inter-function arg flows
+  // (runtime_*/LLVMRuntime_* functions calling each other) that drive
+  // originatesFromScratch's argument-walk into deep / cyclic caller
+  // recursion and crash JIT init. User-kernel modules don't have this
+  // shape because the runtime functions are inlined into the kernel
+  // first, so the pass still gets to lower their loads/stores at
+  // user-kernel JIT time. Skip on the runtime module (detected by the
+  // presence of `runtime_initialize`, which is unique to the runtime BC).
+  const bool is_runtime_module = llvm_module->getFunction("runtime_initialize") != nullptr;
+  if (!is_runtime_module) {
+    extra_fpm.add(new AMDGPUFlatToGlobalLoadStorePass());
+  }
   extra_fpm.doInitialization();
   for (auto func = llvm_module->begin(); func != llvm_module->end(); ++func)
     extra_fpm.run(*func);
   extra_fpm.doFinalization();
 
   // Keep legacy PassManager for backend code generation
-  module_pass_manager.add(llvm::createTargetTransformInfoWrapperPass(
-      machine->getTargetIRAnalysis()));
+  module_pass_manager.add(llvm::createTargetTransformInfoWrapperPass(machine->getTargetIRAnalysis()));
 
   machine->Options.MCOptions.AsmVerbose = true;
 
@@ -298,8 +291,7 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   uint64 random_num = get_random_num();
 
   auto obj_filename = "quadrants_amdgcn_" + std::to_string(random_num) + ".o";
-  auto hsaco_filename =
-      "quadrants_amdgcn_" + std::to_string(random_num) + ".hsaco";
+  auto hsaco_filename = "quadrants_amdgcn_" + std::to_string(random_num) + ".hsaco";
   auto obj_path = tmp_dir + obj_filename;
   auto hsaco_path = tmp_dir + hsaco_filename;
   std::error_code ec;
@@ -307,8 +299,7 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   llvm::SmallString<0> outstr;
   llvm::raw_svector_ostream llvm_stream(outstr);
 
-  machine->addPassesToEmitFile(module_pass_manager, llvm_stream, nullptr,
-                               llvm::CodeGenFileType::ObjectFile, true);
+  machine->addPassesToEmitFile(module_pass_manager, llvm_stream, nullptr, llvm::CodeGenFileType::ObjectFile, true);
 
   function_pass_manager.doInitialization();
   for (auto func = llvm_module->begin(); func != llvm_module->end(); ++func)
@@ -348,8 +339,7 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
     }
   }
 
-  std::string lld_cmd =
-      lld_executable + " -shared " + obj_path + " -o " + hsaco_path;
+  std::string lld_cmd = lld_executable + " -shared " + obj_path + " -o " + hsaco_path;
   QD_TRACE("Linking with command: {}", lld_cmd);
   if (std::system(lld_cmd.c_str()))
     QD_ERROR(
@@ -361,28 +351,25 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   std::string hsaco_str = load_hsaco(hsaco_path);
 
   if (this->config_.print_kernel_llvm_ir_optimized) {
-    static FileSequenceWriter writer(
-        "quadrants_kernel_amdgpu_llvm_ir_optimized_{:04d}.ll",
-        "unoptimized LLVM IR (AMDGPU)");
+    static FileSequenceWriter writer("quadrants_kernel_amdgpu_llvm_ir_optimized_{:04d}.ll",
+                                     "unoptimized LLVM IR (AMDGPU)");
     writer.write(llvm_module.get());
   }
 
   return hsaco_str;
 }
 
-std::unique_ptr<JITSession> create_llvm_jit_session_amdgpu(
-    QuadrantsLLVMContext *tlctx,
-    const CompileConfig &config,
-    Arch arch) {
+std::unique_ptr<JITSession> create_llvm_jit_session_amdgpu(QuadrantsLLVMContext *tlctx,
+                                                           const CompileConfig &config,
+                                                           Arch arch) {
   QD_ASSERT(arch == Arch::amdgpu);
   auto data_layout = QuadrantsLLVMContext::get_data_layout(arch);
   return std::make_unique<JITSessionAMDGPU>(tlctx, config, data_layout);
 }
 #else
-std::unique_ptr<JITSession> create_llvm_jit_session_amdgpu(
-    QuadrantsLLVMContext *tlctx,
-    const CompileConfig &config,
-    Arch arch) {
+std::unique_ptr<JITSession> create_llvm_jit_session_amdgpu(QuadrantsLLVMContext *tlctx,
+                                                           const CompileConfig &config,
+                                                           Arch arch) {
   QD_NOT_IMPLEMENTED
 }
 #endif

@@ -923,7 +923,7 @@ def test_dictcomp_fail():
 
 @pytest.mark.needs_torch
 @pytest.mark.skipif(not has_pytorch(), reason="Pytorch not installed.")
-@test_utils.test(arch=[qd.cpu, qd.cuda])
+@test_utils.test()
 def test_ndarray():
     n = 4
     m = 7
@@ -998,7 +998,7 @@ def test_raise():
 
     with pytest.raises(
         qd.QuadrantsCompilationError,
-        match="Polar decomposition only supports 2D and 3D matrices.",
+        match="Polar decomposition only supports 2×2 and 3×3 matrices.",
     ):
 
         @qd.kernel

@@ -1,8 +1,6 @@
 import argparse
-import atexit
+import importlib.util
 import os
-import shutil
-import tempfile
 
 
 def _test_python(args, default_dir="python"):
@@ -37,7 +35,23 @@ def _test_python(args, default_dir="python"):
         pytest_args += ["--reruns", args.rerun]
     try:
         if args.coverage:
-            pytest_args += ["--cov-branch", "--cov=python/quadrants"]
+            os.environ.setdefault("QD_KERNEL_COVERAGE", "1")
+            os.environ["_QD_KCOV_ARC"] = "1"
+            _spec = importlib.util.find_spec("quadrants")
+            assert _spec is not None and _spec.origin is not None, "quadrants package not found"
+            _cov_src = os.path.dirname(_spec.origin)
+            # Disable the quadrants pytest plugin (pytest11 entry point) during coverage runs.  Loading the plugin
+            # forces Python to import the quadrants parent package before pytest-cov starts measuring, so module-level
+            # code (imports, def lines, etc.) appears uncovered.  The plugin is still useful for *external* users who
+            # run `pytest --cov` on their own code — they don't measure quadrants' own coverage.  We replicate the
+            # plugin's env-var setup (QD_KERNEL_COVERAGE, _QD_KCOV_ARC) above.
+            pytest_args += [
+                "--cov-branch",
+                f"--cov={_cov_src}",
+                f"--cov={test_dir}",
+                "-p",
+                "no:quadrants",
+            ]
         if args.cov_append:
             pytest_args += ["--cov-append"]
         if args.keys:
@@ -48,9 +62,19 @@ def _test_python(args, default_dir="python"):
             pytest_args += ["--failed-first"]
         if args.fail_fast:
             pytest_args += ["--exitfirst"]
+        elif args.maxfail > 0:
+            pytest_args += [f"--maxfail={args.maxfail}"]
         if args.timeout > 0:
             pytest_args += [
                 "--durations=15",
+                # Suppress stock pytest-timeout if installed — it conflicts
+                # with pytest_hardtle (both register the same hook specs).
+                "-p",
+                "no:timeout",
+                # pytest_hardtle uses a CFFI-compiled C watchdog that calls
+                # _exit(1) from a native signal handler, so it can kill tests
+                # hung in native GPU calls even when the GIL is held.
+                # Stock pytest-timeout's signal method cannot do this.
                 "-p",
                 "pytest_hardtle",
                 f"--timeout={args.timeout}",
@@ -74,6 +98,13 @@ def _test_python(args, default_dir="python"):
     else:
         if int(threads) > 1:
             pytest_args += ["-n", str(threads), "--dist=worksteal"]
+    if os.environ.get("QD_FILE_TIMING", "0") == "1":
+        import sys as _sys
+
+        if test_dir not in _sys.path:
+            _sys.path.insert(0, test_dir)
+        pytest_args += ["-p", "pytest_file_timing"]
+
     import pytest  # pylint: disable=C0415
 
     return int(pytest.main(pytest_args))
@@ -151,6 +182,14 @@ def test():
         help="Exit instantly on the first failed test",
     )
     parser.add_argument(
+        "--maxfail",
+        required=False,
+        default=20,
+        type=int,
+        dest="maxfail",
+        help="Stop after this many test failures (default: 20, 0 = no limit)",
+    )
+    parser.add_argument(
         "-C",
         "--coverage",
         required=False,
@@ -204,21 +243,6 @@ def test():
         action="store_true",
         help="Exclude arch(s) from test instead of include them, together with -a",
     )
-    parser.add_argument(
-        "--with-offline-cache",
-        action="store_true",
-        default=os.environ.get("QD_TEST_OFFLINE_CACHE", "0") == "1",
-        dest="with_offline_cache",
-        help="Run tests with offline_cache=True",
-    )
-    parser.add_argument(
-        "--rerun-with-offline-cache",
-        type=int,
-        dest="rerun_with_offline_cache",
-        default=1,
-        help="Rerun all tests with offline_cache=True for given times, together with --with-offline-cache",
-    )
-
     run_count = 1
     args = parser.parse_args()
     print(args)
@@ -229,41 +253,6 @@ def test():
             arch = "^" + arch
         print(f"Running on Arch={arch}")
         os.environ["QD_WANTED_ARCHS"] = arch
-
-    if args.with_offline_cache:
-        run_count += args.rerun_with_offline_cache
-        args.timeout *= run_count
-        tmp_cache_file_path = tempfile.mkdtemp()
-        os.environ["QD_OFFLINE_CACHE"] = "1"
-        os.environ["QD_OFFLINE_CACHE_FILE_PATH"] = tmp_cache_file_path
-        if not os.environ.get("QD_OFFLINE_CACHE_CLEANING_POLICY"):
-            os.environ["QD_OFFLINE_CACHE_CLEANING_POLICY"] = "never"
-
-        def print_and_remove():
-            def size_of_dir(dir):
-                size = 0
-                for root, dirs, files in os.walk(dir):
-                    size += sum([os.path.getsize(os.path.join(root, name)) for name in files])
-                return size
-
-            size = size_of_dir(tmp_cache_file_path)
-            stat = {}
-            countof_tic = 0
-            for p in os.listdir(tmp_cache_file_path):
-                subdir_path = os.path.join(tmp_cache_file_path, p)
-                if os.path.isdir(subdir_path):
-                    stat[p] = len(os.listdir(subdir_path))
-                elif p.endswith(".tic"):
-                    countof_tic += 1
-            stat["*.tic"] = countof_tic
-            shutil.rmtree(tmp_cache_file_path)
-            print("Summary of testing the offline cache:")
-            print(f"    Simple statistics: {stat}")
-            print(f"    Size of cache files: {size / 1024:.2f} KB")
-
-        atexit.register(print_and_remove)
-    else:  # Default: disable offline cache
-        os.environ["QD_OFFLINE_CACHE"] = "0"
 
     if args.cpp:
         # C++ tests are now handled by pytest too,
