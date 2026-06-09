@@ -1056,12 +1056,10 @@ i32 amdgpu_lane_id() {
 i32 amdgpu_cross_half_shuffle_i32(i32 target_lane, i32 value) {
   // Two parallel reads, then a per-lane select. ``permlane64`` is convergent and must execute uniformly across the
   // wave -- lifting it above the select keeps the AMDGPU backend happy and lets it issue exactly one
-  // ``v_permlane64_b32``. ``ds_bpermute`` on RDNA wave64 is SIMD32-scoped with a 5-bit address (top half of the wave
-  // is unreachable directly), so ``from_self_half`` handles the same-SIMD case and ``from_other_half`` handles the
-  // cross-SIMD case via the ``swapped`` payload. On CDNA the wave is one SIMD64 so both reads return the same value
-  // and the select is a no-op; we don't try to optimize that out because the dead read is cheap (LLVM CSE may fold
-  // it anyway).
-  i32 self_lane = amdgpu_lane_id();
+  // ``v_permlane64_b32``. ``ds_bpermute`` has a 5-bit lane address (see the block comment above), so it always reads
+  // a bottom-half lane: ``from_self_half`` is ``value[target_lane & 31]`` and ``from_other_half`` (the
+  // ``permlane64``-swapped read) is ``value[(target_lane & 31) + 32]``.  The select below picks between them purely
+  // on whether the *target* lane lives in the top half; the issuing lane is irrelevant.
   i32 swapped = amdgpu_permlane64(value);
   i32 byte = (target_lane & 31) * 4;
   // ``llvm.amdgcn.ds.bpermute`` is the real hardware ``ds_bpermute_b32`` -- but if LLVM's uniformity analysis decides
@@ -1089,7 +1087,15 @@ i32 amdgpu_cross_half_shuffle_i32(i32 target_lane, i32 value) {
 #endif
   i32 from_self_half = amdgpu_ds_bpermute(byte, value);
   i32 from_other_half = amdgpu_ds_bpermute(byte, swapped);
-  return ((target_lane ^ self_lane) & 32) ? from_other_half : from_self_half;
+  // ``ds_bpermute`` always reads a *bottom-half* lane (``target_lane & 31``), so ``from_self_half`` holds
+  // ``value[target_lane & 31]`` and ``from_other_half`` (the ``permlane64``-swapped read) holds
+  // ``value[(target_lane & 31) + 32]``.  The desired ``value[target_lane]`` therefore lives in ``from_other_half``
+  // exactly when the *target* lane is in the top half -- ``target_lane & 32`` -- independent of which lane issues the
+  // read.  (The previous ``(target_lane ^ self_lane) & 32`` form only coincides with this for bottom-half readers;
+  // for top-half readers it inverts the selection, corrupting every cross-half read on lanes 32..63 -- e.g. block
+  // scans via ``shuffle_up`` first diverge at thread 32.  Reductions masked the bug because their result is consumed
+  // only on lane 0.)
+  return (target_lane & 32) ? from_other_half : from_self_half;
 }
 
 i32 amdgpu_shuffle_i32(i32 index, i32 value) {

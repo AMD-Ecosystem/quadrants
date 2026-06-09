@@ -264,6 +264,49 @@ def reduce_all_max(value, block_dim: template(), dtype: template()):
 
 
 @_func
+def _block_scan_lds(value, block_dim: template(), op: template(), identity, dtype: template(), exclusive: template()):
+    """Permlane-free block-scope scan: double-buffered Hillis-Steele over a ``2 * block_dim`` LDS scratch.
+
+    AMDGPU-only path.  The default subgroup-shuffle + cross-subgroup-fold scan (see ``inclusive_scan`` /
+    ``exclusive_scan`` below) relies on the wave64 cross-half shuffle, whose ``ds_bpermute`` + ``permlane64``
+    LDS-roundtrip emulation races under heavy-kernel instruction scheduling at high wave counts (observable from
+    ``BLOCK_DIM == 512`` / 8 waves, where the tiled scan that feeds the fold returns nondeterministic garbage; the
+    native ``v_permlane64_b32`` that would avoid the emulation crashes the bundled LLVM 22.1.0 AMDGPU backend).  This
+    pure-LDS scan issues no cross-lane shuffle at all -- only ``block.sync()`` barriers and double-buffered LDS
+    reads/writes -- so it is correct and deterministic at every ``block_dim`` and every wave count.
+
+    Algorithm: stage ``value`` into ``buf[0 : block_dim]``; then for ``offset = 1, 2, 4, ... >= block_dim`` read from
+    the current half and write ``op(buf[tid - offset], buf[tid])`` (or the passthrough for ``tid < offset``) into the
+    *other* half, swapping halves each step so there is never an in-place read/write hazard.  ``exclusive`` shifts the
+    final inclusive result right by one lane (lane 0 := ``identity``).  ``ceil(log2(block_dim))`` steps; works for any
+    ``block_dim`` (need not be a power of two).
+    """
+    NSTEPS = impl.static((block_dim - 1).bit_length())
+    tid = thread_idx()
+    buf = SharedArray(impl.static((2 * block_dim,)), dtype)
+    buf[tid] = value
+    sync()
+    # Statically unrolled Hillis-Steele.  ``cur``/``oth``/``off`` are derived from the (compile-time) step index so
+    # they stay Python ints -- a runtime ``for`` loop would turn them into ``Expr`` and break ``impl.static``.
+    for s in impl.static(range(NSTEPS)):
+        cur_base = impl.static((s % 2) * block_dim)
+        oth_base = impl.static(((s + 1) % 2) * block_dim)
+        off = impl.static(1 << s)
+        x = buf[cur_base + tid]
+        if tid >= off:
+            x = op(buf[cur_base + tid - off], x)
+        buf[oth_base + tid] = x
+        sync()
+    final_base = impl.static((NSTEPS % 2) * block_dim)
+    if impl.static(exclusive):
+        result = identity
+        if tid > 0:
+            result = buf[final_base + tid - 1]
+        return result
+    return buf[final_base + tid]
+
+
+@_func
 def inclusive_scan(value, block_dim: template(), op: template(), dtype: template()):
     """Block-scope inclusive scan under a generic associative ``op``.  Every thread receives a valid result.
 
@@ -287,6 +330,11 @@ def inclusive_scan(value, block_dim: template(), op: template(), dtype: template
         "block.inclusive_scan: block_dim must be a positive multiple of subgroup size",
     )
     NUM_SUBGROUPS = impl.static(block_dim // SUBGROUP_SIZE)
+
+    # AMDGPU: use the permlane-free pure-LDS scan -- the wave64 cross-half shuffle emulation races at high wave counts
+    # (see ``_block_scan_lds``).  ``identity`` is unused on the inclusive path; ``value`` is just a typed placeholder.
+    if impl.static(impl.get_runtime().prog.config().arch == _qd_core.amdgpu):
+        return _block_scan_lds(value, block_dim, op, value, dtype, False)
 
     inclusive = _reductions._inclusive_scan_tiled(value, op, log2_subgroup)
 
@@ -335,6 +383,11 @@ def exclusive_scan(value, block_dim: template(), op: template(), identity, dtype
         "block.exclusive_scan: block_dim must be a positive multiple of subgroup size",
     )
     NUM_SUBGROUPS = impl.static(block_dim // SUBGROUP_SIZE)
+
+    # AMDGPU: use the permlane-free pure-LDS scan -- the wave64 cross-half shuffle emulation races at high wave counts
+    # (see ``_block_scan_lds``).
+    if impl.static(impl.get_runtime().prog.config().arch == _qd_core.amdgpu):
+        return _block_scan_lds(value, block_dim, op, identity, dtype, True)
 
     exclusive = _reductions._exclusive_scan_tiled(value, op, identity, log2_subgroup)
 
@@ -602,18 +655,20 @@ def _radix_rank_match_atomic_or_wave64(
     NUM_BITS_MASK = impl.static((1 << num_bits) - 1)
     BINS_PER_LANE = impl.static(RADIX_DIGITS // SUBGROUP_THREADS)
 
+    # No ``smem_match`` region on wave64: the per-digit peer mask is derived from subgroup ballots (step 5), not from
+    # an i64 LDS atomic_or cell.  The old atomic_or-on-i64-LDS + u64-popcnt match miscompiles on the wave64 AMDGPU
+    # backend (garbage ranks -> OOB scatter -> GPU fault in device_radix_sort n=1M); the ballot form sidesteps LDS
+    # atomics entirely.  This also frees the 8 KiB i64 LDS region the match cell used to need at radix_bits=8.
     smem_offsets = SharedArray(impl.static((BLOCK_SUBGROUPS * RADIX_DIGITS,)), _i32)
-    smem_match = SharedArray(impl.static((BLOCK_SUBGROUPS * RADIX_DIGITS,)), _i64)
 
     tid = thread_idx()
     subgroup_idx = tid // SUBGROUP_THREADS
     lane = _ops.cast(_subgroup.invocation_id(), _i32)
 
-    # Step 1: zero per-subgroup histograms and match_masks.
+    # Step 1: zero per-subgroup histograms.
     for b in impl.static(range(BINS_PER_LANE)):
         bin_idx = lane + impl.static(b * SUBGROUP_THREADS)
         smem_offsets[subgroup_idx * RADIX_DIGITS + bin_idx] = _i32(0)
-        smem_match[subgroup_idx * RADIX_DIGITS + bin_idx] = _i64(0)
     _subgroup_sync_fence()
 
     digit = _ops.cast(_ops.bit_and(_ops.bit_shr(key, _u32(bit_start)), _u32(NUM_BITS_MASK)), _i32)
@@ -629,6 +684,15 @@ def _radix_rank_match_atomic_or_wave64(
 
     exclusive_digit_prefix = exclusive_add(bin_count, block_dim, _i32)
 
+    # Publish the per-digit total + exclusive prefix to the caller's outparams *now*, while ``bin_count`` /
+    # ``exclusive_digit_prefix`` are still live and known-correct.  Deferring these writes until after steps 4-5 (as
+    # the original did) makes their source registers span the downsweep + match phase; under the wave64 AMDGPU
+    # backend that long live range gets clobbered (observed as garbage ``bins`` / ``excl_prefix`` -> wrong scatter
+    # offsets).  ``bins`` / ``excl_prefix`` are caller-owned and untouched by steps 4-5, so an early write is safe and
+    # the trailing ``sync()`` still guarantees visibility.
+    bins[tid] = bin_count
+    excl_prefix[tid] = exclusive_digit_prefix
+
     for j_subgroup in impl.static(range(BLOCK_SUBGROUPS)):
         smem_offsets[impl.static(j_subgroup * RADIX_DIGITS) + tid] = (
             smem_offsets[impl.static(j_subgroup * RADIX_DIGITS) + tid] + exclusive_digit_prefix
@@ -636,37 +700,40 @@ def _radix_rank_match_atomic_or_wave64(
 
     sync()
 
-    # Step 5 - wave64 specifics: u64 ballot mask via inline ``one_at_lane | (one_at_lane - 1)`` (avoids UB on
-    # lane=63), atomic_or on the i64 match cell, clz / popcnt on u64.  Leader formula is ``63 - clz(u64)``.
+    # Step 5 - wave64 match-and-rank via subgroup ballots (CUB ``MatchAny``).  Instead of OR-ing each lane's bit into
+    # a shared i64 cell and reading it back, every lane reconstructs its per-digit peer mask -- the set of lanes in its
+    # subgroup that share ``digit`` -- with ``num_bits`` subgroup ballots:
+    #
+    #   peers = &_{b in [0,num_bits)}  ( bit_b(digit) ? ballot(bit_b==1) : ~ballot(bit_b==1) )
+    #
+    # ``subgroup.ballot`` lowers to ``llvm.amdgcn.ballot.i64`` (full 64-lane mask, isel-clean on wave64 -- unlike the
+    # i32 ballot and unlike the i64 LDS atomic_or this replaces).  No LDS atomics and no cross-lane shuffle, so neither
+    # the i64-atomic_or miscompile nor the divergent ``ds_bpermute`` emulation bug can be hit.
+    #
+    # The branch on ``bit_b(digit)`` is done branchlessly: ``xor_mask = u64(bit) - 1`` is ``0`` when ``bit==1`` and
+    # all-ones (0xFFFF...F) when ``bit==0`` (unsigned wraparound), so ``ballot_b ^ xor_mask`` yields ``ballot_b`` or
+    # its complement without divergent control flow.
+    digit_u32 = _ops.cast(digit, _u32)
+    peers = _u64(0xFFFFFFFFFFFFFFFF)
+    for bit_b in impl.static(range(num_bits)):
+        bit_val = _ops.bit_and(_ops.bit_shr(digit_u32, _u32(impl.static(bit_b))), _u32(1))
+        ballot_b = _ops.cast(_subgroup.ballot(_ops.cast(bit_val, _i32)), _u64)
+        xor_mask = _ops.cast(bit_val, _u64) - _u64(1)
+        peers = _ops.bit_and(peers, _ops.bit_xor(ballot_b, xor_mask))
+
+    # ``popc`` = 1-based position of this lane among its peers at indices ``<= lane`` (lowest matching lane -> 1).
     lane_u64 = _ops.cast(lane, _u64)
-    lane_mask = _u64(1) << lane_u64
-    lane_mask_le_v = lane_mask | (lane_mask - _u64(1))
+    one_at_lane = _u64(1) << lane_u64
+    lane_mask_le_v = one_at_lane | (one_at_lane - _u64(1))
+    popc = _ops.popcnt(_ops.bit_and(peers, lane_mask_le_v))
 
-    match_idx = subgroup_idx * RADIX_DIGITS + digit
+    # Every lane of a (subgroup, digit) group shares one offset cell, ``smem_offsets[sg*RD + digit]``, which already
+    # holds that group's block-wide base offset after the step-4 downsweep + the ``sync()`` above.  Each lane reads it
+    # directly and derives its rank as ``base + popc - 1`` -- so the lowest matching lane gets ``base + 0``, the next
+    # ``base + 1``, ...  ``items_per_thread == 1`` so the cell needs no post-increment.
+    base_offset = smem_offsets[subgroup_idx * RADIX_DIGITS + digit]
+    rank = base_offset + _ops.cast(popc, _i32) - _i32(1)
 
-    _ops.atomic_or(smem_match[match_idx], _ops.cast(lane_mask, _i64))
-    _subgroup_sync_fence()
-
-    # u64 clz via FindUMsb-equivalent on every backend; the wave32 path's caveat about FindSMsb vs FindUMsb on i64
-    # would apply on SPIR-V wave64 devices if those existed (today wave64 = AMDGPU only).
-    bin_mask = _ops.cast(smem_match[match_idx], _u64)
-    leader = _i32(63) - _ops.cast(_ops.clz(bin_mask), _i32)
-    popc = _ops.popcnt(_ops.bit_and(bin_mask, lane_mask_le_v))
-
-    subgroup_offset = _i32(0)
-    if lane == leader:
-        subgroup_offset = _ops.atomic_add(smem_offsets[subgroup_idx * RADIX_DIGITS + digit], _ops.cast(popc, _i32))
-
-    subgroup_offset = _subgroup.shuffle(subgroup_offset, _ops.cast(leader, _u32))
-
-    if lane == leader:
-        smem_match[match_idx] = _i64(0)
-    _subgroup_sync_fence()
-
-    rank = subgroup_offset + _ops.cast(popc, _i32) - _i32(1)
-
-    bins[tid] = bin_count
-    excl_prefix[tid] = exclusive_digit_prefix
     sync()
 
     return rank

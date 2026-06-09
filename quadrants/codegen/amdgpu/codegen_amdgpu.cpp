@@ -24,6 +24,59 @@ namespace lang {
 
 using namespace llvm;
 
+namespace {
+constexpr unsigned kAmdgpuLdsAddrSpace = 3;
+
+// True if ``v`` is, or (for ``block.SharedArray``) transitively references, a
+// value living in AMDGPU LDS (addrspace(3)). Shared arrays are emitted as a
+// module-level ``addrspace(3)`` global immediately ``addrspacecast``-ed to
+// addrspace(0); because the global is constant, that cast folds into a
+// ``ConstantExpr`` rather than an instruction, so the addrspace(3) marker only
+// survives *nested inside* the constant operand of the loads/stores. We
+// therefore have to descend through constant expressions, not just look at
+// top-level operand types. ``seen`` guards against cyclic constant graphs.
+bool value_references_lds(llvm::Value *v, llvm::SmallPtrSetImpl<llvm::Value *> &seen) {
+  if (!v || !seen.insert(v).second) {
+    return false;
+  }
+  if (auto *pty = llvm::dyn_cast<llvm::PointerType>(v->getType())) {
+    if (pty->getAddressSpace() == kAmdgpuLdsAddrSpace) {
+      return true;
+    }
+  }
+  if (auto *ce = llvm::dyn_cast<llvm::ConstantExpr>(v)) {
+    for (llvm::Value *op : ce->operands()) {
+      if (value_references_lds(op, seen)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Returns true if ``func`` reads or writes LDS anywhere in its body. Used to
+// force-inline LDS-touching range_for bodies so all threads of the offloaded
+// task share one LDS allocation (see the call site).
+bool function_uses_lds(llvm::Function *func) {
+  llvm::SmallPtrSet<llvm::Value *, 16> seen;
+  for (llvm::BasicBlock &bb : *func) {
+    for (llvm::Instruction &inst : bb) {
+      seen.clear();
+      if (value_references_lds(&inst, seen)) {
+        return true;
+      }
+      for (llvm::Value *op : inst.operands()) {
+        seen.clear();
+        if (value_references_lds(op, seen)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+}  // namespace
+
 class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
  public:
   using IRVisitor::visit;
@@ -304,6 +357,22 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
         if (instr_count <= kAmdgpuRangeForBodyInlineThreshold) {
           should_inline = true;
         }
+      }
+      // CORRECTNESS OVERRIDE (must win over the size gate above): a range_for
+      // body that touches workgroup-shared LDS (addrspace(3) -- ``block.SharedArray``)
+      // MUST be inlined into the offloaded task, regardless of size or the
+      // ``force_inline`` request. When such a body is left out-of-line, it is
+      // emitted as a separate ``amdgpu_kernel``-attributed function whose
+      // module-level LDS globals are allocated independently of the caller's;
+      // the per-thread ``s_swappc_b64`` call then operates on a different LDS
+      // frame than the surrounding block, so cross-thread publish/observe via
+      // SharedArray (e.g. radix-rank histogram bins, block reductions) reads
+      // stale / uninitialised LDS and the result is nondeterministically wrong.
+      // Inlining keeps the body in the task function so all threads share the
+      // one LDS allocation. This only force-inlines bodies that actually use
+      // LDS, so the perf-motivated size gate still applies to LDS-free bodies.
+      if (!should_inline && function_uses_lds(body)) {
+        should_inline = true;
       }
       if (should_inline) {
         tlctx->mark_inline(body);

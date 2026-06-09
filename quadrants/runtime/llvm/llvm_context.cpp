@@ -692,11 +692,18 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(const std::
         auto store_ptr = builder.CreateInBoundsGEP(buf_ty, lds_global, llvm::ArrayRef<llvm::Value *>(store_idxs));
         builder.CreateStore(value_arg, store_ptr);
 
-        // Wavefront-scope acquire-release fence -> ``s_waitcnt lgkmcnt(0)`` on AMDGPU; orders LDS writes against
-        // subsequent LDS reads within the wave without touching cross-wave state (avoids the ``s_barrier`` that a
-        // workgroup-scope fence would emit, which deadlocks if only some waves in the workgroup reach this point).
-        llvm::SyncScope::ID wave_scope = ctx->getOrInsertSyncScopeID("wavefront");
-        builder.CreateFence(llvm::AtomicOrdering::AcquireRelease, wave_scope);
+        // Acquire-release fence that orders the LDS store above against the cross-lane LDS load below.  This MUST be
+        // ``workgroup`` scope, not ``wavefront``: LDS is workgroup-shared address space, and the AMDGPU
+        // ``SIMemoryLegalizer`` only emits the ``s_waitcnt lgkmcnt(0)`` that orders LDS traffic for a fence whose scope
+        // is at least as wide as the memory's scope.  A ``wavefront``-scope fence is *narrower* than workgroup, so the
+        // legalizer treats it as not governing LDS at all and emits no waitcnt -- which left the ``ds_write`` -> partner
+        // ``ds_read`` pair with no synchronization, so each lane could read its partner's stale / in-flight slot.  That
+        // is a cross-lane Read-After-Write hazard and showed up as a nondeterministic, wrong cross-half shuffle (the
+        // ``permlane64`` swap silently returned garbage for some lanes).  A workgroup-scope *fence* lowers to
+        // ``s_waitcnt`` + cache ops, NOT an ``s_barrier`` (only the ``barrier()`` control intrinsic emits ``s_barrier``),
+        // so there is no divergent-wave deadlock risk -- this is the same scope ``block_mem_fence`` already uses safely.
+        llvm::SyncScope::ID lds_scope = ctx->getOrInsertSyncScopeID("workgroup");
+        builder.CreateFence(llvm::AtomicOrdering::AcquireRelease, lds_scope);
 
         // partner_lane = lane ^ 32; result = lds[wave_base + partner_lane]
         auto partner_lane = builder.CreateXor(lane, llvm::ConstantInt::get(i32_ty, 32));
@@ -704,6 +711,15 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(const std::
         llvm::Value *load_idxs[] = {zero32, partner_slot};
         auto load_ptr = builder.CreateInBoundsGEP(buf_ty, lds_global, llvm::ArrayRef<llvm::Value *>(load_idxs));
         auto result = builder.CreateAlignedLoad(i32_ty, load_ptr, llvm::Align(4));
+        // Second workgroup-scope fence -> a trailing ``s_waitcnt lgkmcnt(0)`` that forces this call's LDS *read* to
+        // retire before any later code (in particular, the next inlined ``amdgpu_permlane64`` call's LDS *store* to the
+        // same single shared ``__amdgpu_permlane64_lds`` buffer) can issue.  Without it, back-to-back permlane64 calls
+        // -- e.g. ``_exclusive_scan_tiled``'s leading ``shuffle_up(value, 1)`` immediately followed by the inclusive
+        // scan's own ``shuffle_up`` chain -- form a Write-After-Read hazard: call N+1's store can overtake call N's
+        // still-outstanding read of the same slot, so a lane reads its partner's *next* value instead of the current
+        // one.  The leading fence above closes the within-call Read-After-Write; this one closes the across-call
+        // Write-After-Read.  Both must be workgroup scope for the LDS waitcnt to be emitted (see above).
+        builder.CreateFence(llvm::AtomicOrdering::AcquireRelease, lds_scope);
         builder.CreateRet(result);
 
         QuadrantsLLVMContext::mark_inline(permlane64_func);
