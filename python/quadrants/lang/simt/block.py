@@ -23,7 +23,6 @@ from quadrants.lang.simt.reductions import _bin_add, _bin_max, _bin_min
 from quadrants.lang.util import quadrants_scope
 from quadrants.types.annotations import template
 from quadrants.types.primitive_types import i32 as _i32
-from quadrants.types.primitive_types import i64 as _i64
 from quadrants.types.primitive_types import u32 as _u32
 from quadrants.types.primitive_types import u64 as _u64
 

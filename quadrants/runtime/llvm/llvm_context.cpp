@@ -696,12 +696,14 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(const std::
         // ``workgroup`` scope, not ``wavefront``: LDS is workgroup-shared address space, and the AMDGPU
         // ``SIMemoryLegalizer`` only emits the ``s_waitcnt lgkmcnt(0)`` that orders LDS traffic for a fence whose scope
         // is at least as wide as the memory's scope.  A ``wavefront``-scope fence is *narrower* than workgroup, so the
-        // legalizer treats it as not governing LDS at all and emits no waitcnt -- which left the ``ds_write`` -> partner
+        // legalizer treats it as not governing LDS at all and emits no waitcnt -- which left the ``ds_write`` ->
+        // partner
         // ``ds_read`` pair with no synchronization, so each lane could read its partner's stale / in-flight slot.  That
         // is a cross-lane Read-After-Write hazard and showed up as a nondeterministic, wrong cross-half shuffle (the
         // ``permlane64`` swap silently returned garbage for some lanes).  A workgroup-scope *fence* lowers to
-        // ``s_waitcnt`` + cache ops, NOT an ``s_barrier`` (only the ``barrier()`` control intrinsic emits ``s_barrier``),
-        // so there is no divergent-wave deadlock risk -- this is the same scope ``block_mem_fence`` already uses safely.
+        // ``s_waitcnt`` + cache ops, NOT an ``s_barrier`` (only the ``barrier()`` control intrinsic emits
+        // ``s_barrier``), so there is no divergent-wave deadlock risk -- this is the same scope ``block_mem_fence``
+        // already uses safely.
         llvm::SyncScope::ID lds_scope = ctx->getOrInsertSyncScopeID("workgroup");
         builder.CreateFence(llvm::AtomicOrdering::AcquireRelease, lds_scope);
 
