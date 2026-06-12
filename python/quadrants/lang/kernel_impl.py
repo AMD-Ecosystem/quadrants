@@ -142,6 +142,18 @@ def _validate_fn_attrs(fn_attrs: dict[str, dict[str, str]], func_name: str) -> N
                 )
 
 
+def _qualname_is_method(func: Callable) -> bool:
+    # Robust, frame-independent class-kernel signal: a method defined in a class
+    # body has a dotted __qualname__ whose immediate owner is a class (i.e. not
+    # "<locals>", which denotes a function-nested definition). This backstops the
+    # stack-frame/source-text heuristic in _inside_class, which can misfire under
+    # the full parallel (xdist) test collection and wrongly reject the unannotated
+    # |self| parameter with "Quadrants kernels parameters must be type annotated".
+    qualname = getattr(func, "__qualname__", "")
+    parts = qualname.split(".")
+    return len(parts) >= 2 and parts[-2] != "<locals>"
+
+
 def _kernel_impl(
     _func: Callable,
     level_of_class_stackframe: int,
@@ -153,7 +165,7 @@ def _kernel_impl(
         _validate_fn_attrs(fn_attrs, _func.__name__)
     # Can decorators determine if a function is being defined inside a class?
     # https://stackoverflow.com/a/8793684/12003165
-    is_classkernel = _inside_class(level_of_class_stackframe + 1)
+    is_classkernel = _inside_class(level_of_class_stackframe + 1) or _qualname_is_method(_func)
 
     if verbose:
         print(f"kernel={_func.__name__} is_classkernel={is_classkernel}")
