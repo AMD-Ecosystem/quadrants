@@ -1014,6 +1014,13 @@ i32 amdgpu_ds_bpermute(i32 byte_index, i32 value) {
   return 0;
 }
 
+// Patched at JIT (see llvm_context.cpp) to a compile-time 1 where ds_bpermute is full-wave (gfx94x), else 0.
+// Selects the cross-half routing in amdgpu_cross_half_shuffle_i32; as a constant it folds the dependent branch.
+i32 amdgpu_ds_bpermute_full_wave() {
+  __builtin_trap();
+  return 0;
+}
+
 // Exchanges a 32-bit value between lanes ``i`` and ``i ^ 32`` in a single instruction. The native instruction
 // ``v_permlane64_b32`` is only available on gfx940+ (CDNA3) and gfx11+ (RDNA3+); ``llvm_context.cpp`` detects the
 // target at JIT time and patches this stub to either the ``llvm.amdgcn.permlane64`` intrinsic (on supported
@@ -1089,13 +1096,19 @@ i32 amdgpu_lane_id() {
 // have a ``lane_in_group`` predicate at the call site, ``shuffle_xor`` is always in-range for the mask range we
 // support, etc. We just need OOR not to crash or corrupt in-range lanes.
 i32 amdgpu_cross_half_shuffle_i32(i32 target_lane, i32 value) {
-  // Two parallel reads, then a per-lane select. ``permlane64`` is convergent and must execute uniformly across the
-  // wave -- lifting it above the select keeps the AMDGPU backend happy and lets it issue exactly one
-  // ``v_permlane64_b32``. ``ds_bpermute`` on RDNA wave64 is SIMD32-scoped with a 5-bit address (top half of the wave
-  // is unreachable directly), so ``from_self_half`` handles the same-SIMD case and ``from_other_half`` handles the
-  // cross-SIMD case via the ``swapped`` payload. On CDNA the wave is one SIMD64 so both reads return the same value
-  // and the select is a no-op; we don't try to optimize that out because the dead read is cheap (LLVM CSE may fold
-  // it anyway).
+  // gfx94x: ds_bpermute is full-wave (6-bit lane index), so one direct read reaches any target lane from every
+  // issuing lane -- no permlane64, no half-select. The dead permlane64 call also can't hit the v_permlane64_b32
+  // codegen crash in LLVM 22 (predicate is a compile-time 1 here, so the branch below folds away).
+  if (amdgpu_ds_bpermute_full_wave()) {
+    i32 byte64 = (target_lane & 63) * 4;
+#if defined(ARCH_amdgpu) && (defined(__x86_64__) || defined(__i386__) || defined(__amdgcn__))
+    __asm__ volatile("" : "+v"(byte64));
+#endif
+    return amdgpu_ds_bpermute(byte64, value);
+  }
+  // RDNA path: ds_bpermute is SIMD32-scoped (5-bit address, can't reach the top half), so pair a same-SIMD read
+  // (from_self_half) with a permlane64-swapped cross-SIMD read (from_other_half) and select per lane below.
+  // permlane64 is convergent, so lift it above the select to emit exactly one v_permlane64_b32.
   i32 self_lane = amdgpu_lane_id();
   i32 swapped = amdgpu_permlane64(value);
   i32 byte = (target_lane & 31) * 4;
@@ -1124,6 +1137,7 @@ i32 amdgpu_cross_half_shuffle_i32(i32 target_lane, i32 value) {
 #endif
   i32 from_self_half = amdgpu_ds_bpermute(byte, value);
   i32 from_other_half = amdgpu_ds_bpermute(byte, swapped);
+  // Select the half. Reads are relative to the issuing lane's SIMD, so ``target ^ self`` picks the cross-SIMD read.
   return ((target_lane ^ self_lane) & 32) ? from_other_half : from_self_half;
 }
 

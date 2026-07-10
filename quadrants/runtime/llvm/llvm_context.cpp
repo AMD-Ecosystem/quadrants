@@ -574,6 +574,21 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(const std::
       // have to pass the explicit ``i32`` type alongside the ID -- otherwise ``CreateIntrinsic`` segfaults inside
       // ``getDeclaration()`` while resolving the mangled name.
       auto mcpu_str = AMDGPUContext::get_instance().get_mcpu();
+      // CDNA3 (gfx94x): ds_bpermute is full-wave (64-lane), so amdgpu_cross_half_shuffle_i32 (runtime.cpp) uses a
+      // single direct ds_bpermute instead of the SIMD32 permlane64 path. Verified on gfx942; gfx940/941 share the ISA.
+      bool ds_bpermute_full_wave =
+          (mcpu_str == "gfx940" || mcpu_str == "gfx941" || mcpu_str == "gfx942");
+      {
+        auto func = module->getFunction("amdgpu_ds_bpermute_full_wave");
+        if (func) {
+          func->deleteBody();
+          auto bb = llvm::BasicBlock::Create(*ctx, "entry", func);
+          IRBuilder<> builder(*ctx);
+          builder.SetInsertPoint(bb);
+          builder.CreateRet(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), ds_bpermute_full_wave ? 1 : 0));
+          QuadrantsLLVMContext::mark_inline(func);
+        }
+      }
       bool has_permlane64 = (mcpu_str == "gfx940" || mcpu_str == "gfx941" || mcpu_str == "gfx942" ||
                              mcpu_str.substr(0, 5) == "gfx11" || mcpu_str.substr(0, 5) == "gfx12");
       // Escape hatch for validating the LDS software emulation on hardware that natively supports
