@@ -188,34 +188,6 @@ def test_static_assert_nonstatic_condition():
 # QD_TEST_PYTHON when the parent was started under a non-default dynamic loader.
 
 
-class _WallClockTimeout:
-    """Best-effort SIGALRM guard so a barrier-deadlock regression cannot hang CI forever."""
-
-    def __init__(self, seconds: int):
-        self.seconds = seconds
-        self._prev = None
-
-    def _handler(self, signum, frame):
-        raise TimeoutError(
-            f"AMDGPU assert test exceeded {self.seconds}s wall clock "
-            "(possible s_barrier deadlock / missing trap regression)"
-        )
-
-    def __enter__(self):
-        import signal
-
-        self._prev = signal.signal(signal.SIGALRM, self._handler)
-        signal.alarm(self.seconds)
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        import signal
-
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, self._prev)
-        return False
-
-
 def _amdgpu_available_for_assert_tests() -> bool:
     return qd.amdgpu in test_utils.expected_archs() and is_arch_supported(qd.amdgpu)
 
