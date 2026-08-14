@@ -10,6 +10,7 @@ namespace {
 
 AmdgpuLaunchFailureHook g_amdgpu_launch_failure_hook = nullptr;
 bool g_amdgpu_device_assert_already_surfaced = false;
+bool g_amdgpu_device_in_teardown = false;
 
 }  // namespace
 
@@ -31,6 +32,14 @@ void amdgpu_reset_device_assert_surfaced_flag() {
 
 void amdgpu_mark_device_assert_surfaced() {
   g_amdgpu_device_assert_already_surfaced = true;
+}
+
+bool amdgpu_device_in_teardown() {
+  return g_amdgpu_device_in_teardown;
+}
+
+void amdgpu_set_device_in_teardown(bool in_teardown) {
+  g_amdgpu_device_in_teardown = in_teardown;
 }
 
 std::string get_amdgpu_error_message(uint32 err) {

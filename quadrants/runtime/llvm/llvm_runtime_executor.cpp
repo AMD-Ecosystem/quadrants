@@ -534,6 +534,15 @@ uint64_t *LlvmRuntimeExecutor::get_device_alloc_info_ptr(const DeviceAllocation 
 
 void LlvmRuntimeExecutor::finalize() {
   profiler_ = nullptr;
+#if defined(QD_WITH_AMDGPU)
+  // Entering teardown: from here the driver may issue calls on a HIP context that a prior
+  // in-kernel assert left dead. Allow those launch failures to be swallowed (see
+  // AMDGPUFunction::operator()) so destructors do not std::terminate(); outside teardown a
+  // post-assert launch failure is still surfaced as a hard error.
+  if (config_.arch == Arch::amdgpu) {
+    amdgpu_set_device_in_teardown(true);
+  }
+#endif
   // Release the host-owned adstack heap before the device teardown below so its `DeviceAllocationGuard` destructor
   // runs while the RHI device is still valid. The destructor drops the allocation back to the driver memory pool
   // (or to the host allocator on CPU); deferring past `llvm_device()->clear()` would leak it.
@@ -951,6 +960,7 @@ void LlvmRuntimeExecutor::materialize_runtime(KernelProfilerBase *profiler, uint
     assert_error_state_host_ptr_ = host_slot;
     g_amdgpu_assert_error_state_host = static_cast<AmdgpuAssertErrorStateHostView *>(host_slot);
     amdgpu_reset_device_assert_surfaced_flag();
+    amdgpu_set_device_in_teardown(false);
     set_amdgpu_launch_failure_hook(amdgpu_launch_failure_assert_hook);
     // UVA: host pointer is also a valid device pointer on GFX9+.
     runtime_jit->call<void *, void *>("runtime_set_assert_error_state_dev_ptr", llvm_runtime_, host_slot);

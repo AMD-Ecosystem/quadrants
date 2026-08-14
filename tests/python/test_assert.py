@@ -293,3 +293,49 @@ def test_amdgpu_assert_barrier_no_hang():
             raise SystemExit("expected QuadrantsAssertionError")
         """
     )
+
+
+@pytest.mark.skipif(not _amdgpu_available_for_assert_tests(), reason="AMDGPU not available/wanted")
+def test_amdgpu_assert_dead_context_reuse_raises():
+    """After an assert is caught, the HIP context is dead: further GPU work must raise a
+    hard error, not silently 'succeed' on the dead context (Codex #871 P1)."""
+    _run_amdgpu_assert_child(
+        """
+        import quadrants as qd
+        qd.init(arch=qd.amdgpu, debug=True, gdb_trigger=False)
+
+        @qd.kernel
+        def boom():
+            assert False, "amdgpu assert probe"
+
+        @qd.kernel
+        def add_one(x: qd.types.ndarray(dtype=qd.i32, ndim=1)):
+            for i in range(x.shape[0]):
+                x[i] = x[i] + 1
+
+        # Allocate the array while the context is still alive; reusing it after the assert is
+        # what must fail loudly. (Allocation itself also goes through the dead context once the
+        # assert has fired, so it must happen first.)
+        arr = qd.ndarray(qd.i32, shape=(8,))
+
+        try:
+            boom()
+        except qd.QuadrantsAssertionError:
+            pass
+        else:
+            raise SystemExit("expected QuadrantsAssertionError from the first kernel")
+
+        # Context is dead now. In debug mode the kernel launch synchronizes and checks the
+        # runtime error, so a subsequent launch must surface a hard error rather than
+        # returning stale/uninitialized results as success.
+        try:
+            add_one(arr)
+        except qd.QuadrantsAssertionError:
+            # Another assertion would also be acceptable, but must not be a silent success.
+            pass
+        except Exception:
+            pass  # expected: hard error on the dead context
+        else:
+            raise SystemExit("post-assert GPU work silently succeeded on a dead HIP context")
+        """
+    )

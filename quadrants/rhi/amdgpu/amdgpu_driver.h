@@ -1,5 +1,6 @@
 #pragma once
 
+#include <exception>
 #include <mutex>
 
 #include "quadrants/common/dynamic_loader.h"
@@ -54,10 +55,16 @@ using AmdgpuLaunchFailureHook = void (*)();
 void set_amdgpu_launch_failure_hook(AmdgpuLaunchFailureHook hook);
 AmdgpuLaunchFailureHook get_amdgpu_launch_failure_hook();
 // True after a debug-mode device assert has been surfaced as QuadrantsAssertionError.
-// Subsequent hipErrorLaunchFailure results are ignored (HIP context is dead).
+// The HIP context is dead afterward, so subsequent calls also return launch failure.
 bool amdgpu_device_assert_already_surfaced();
 void amdgpu_reset_device_assert_surfaced_flag();
 void amdgpu_mark_device_assert_surfaced();
+// True while a Program/executor is tearing down. Dead-context launch failures are only
+// suppressed inside this window (or while unwinding the just-thrown assertion) so destructors
+// do not std::terminate(); outside it, post-assert launch failures are surfaced as hard errors
+// instead of silently reported as success on a dead context. Set by LlvmRuntimeExecutor.
+bool amdgpu_device_in_teardown();
+void amdgpu_set_device_in_teardown(bool in_teardown);
 // `hipFuncAttributeMaxDynamicSharedMemorySize` from the `hipFuncAttribute` enum in ROCm/clr
 // hipamd/include/hip/hip_runtime_api.h. Used with `kernel_set_attribute` (`hipFuncSetAttribute`) to opt in to >48 KB
 // of dynamic shared memory for graph kernel nodes that request it.
@@ -108,12 +115,22 @@ class AMDGPUFunction {
     // can raise QuadrantsAssertionError from pinned host memory (context is dead after trap).
     if (err == HIP_ERROR_LAUNCH_FAILURE) {
       if (auto hook = get_amdgpu_launch_failure_hook()) {
-        hook();  // may throw QuadrantsAssertionError
+        hook();  // may throw QuadrantsAssertionError on first surfacing
       }
-      // After the assertion has been surfaced, further HIP calls on the dead context also return
-      // launch failure; ignore them so Program teardown does not terminate() from a destructor.
       if (amdgpu_device_assert_already_surfaced()) {
-        return;
+        // The HIP context is dead after the trap, so every later call also returns launch
+        // failure. Suppress only where throwing would std::terminate(): inside teardown
+        // destructors, or while unwinding the just-thrown QuadrantsAssertionError. Anywhere
+        // else (e.g. user code that caught the assertion and kept issuing GPU work) fail
+        // loudly instead of returning stale/uninitialized results as success.
+        if (amdgpu_device_in_teardown() || std::uncaught_exceptions() > 0) {
+          return;
+        }
+        QD_ERROR(
+            "AMDGPU device context is unusable after an in-kernel assertion failure; "
+            "re-initialize Quadrants in a fresh process before issuing further GPU work "
+            "(while calling {} ({}))",
+            name_, symbol_name_);
       }
     }
     QD_ERROR_IF(err, get_error_message(err));
