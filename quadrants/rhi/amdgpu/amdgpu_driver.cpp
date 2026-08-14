@@ -6,6 +6,32 @@
 
 namespace quadrants {
 namespace lang {
+namespace {
+
+AmdgpuLaunchFailureHook g_amdgpu_launch_failure_hook = nullptr;
+bool g_amdgpu_device_assert_already_surfaced = false;
+
+}  // namespace
+
+void set_amdgpu_launch_failure_hook(AmdgpuLaunchFailureHook hook) {
+  g_amdgpu_launch_failure_hook = hook;
+}
+
+AmdgpuLaunchFailureHook get_amdgpu_launch_failure_hook() {
+  return g_amdgpu_launch_failure_hook;
+}
+
+bool amdgpu_device_assert_already_surfaced() {
+  return g_amdgpu_device_assert_already_surfaced;
+}
+
+void amdgpu_reset_device_assert_surfaced_flag() {
+  g_amdgpu_device_assert_already_surfaced = false;
+}
+
+void amdgpu_mark_device_assert_surfaced() {
+  g_amdgpu_device_assert_already_surfaced = true;
+}
 
 std::string get_amdgpu_error_message(uint32 err) {
   auto err_name_ptr = AMDGPUDriver::get_instance_without_context().get_error_name(err);
