@@ -630,6 +630,14 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
     AMDGPUDriver::get_instance().memcpy_host_to_device_async(device_arg_buffer, ctx.get_context().arg_buffer,
                                                              ctx.arg_buffer_size, active_stream);
     ctx.get_context().arg_buffer = device_arg_buffer;
+  } else {
+    // Argument-less kernels (arg_buffer_size == 0) never dereference `arg_buffer` - codegen emits no arg-buffer
+    // loads, and host readback reads `LaunchContextBuilder`'s own buffer directly, not `ctx.arg_buffer`. Pin the
+    // field to nullptr instead of leaving the per-launch-varying host allocation `LaunchContextBuilder` put there,
+    // so `RuntimeContext` stays byte-stable across launches (letting the skip-H2D cache below hit for this common
+    // launch-bound case) and no host pointer sits in a device-visible field. Symmetric with the `result_buffer`
+    // pinning above; nullptr (not the persistent device arg buffer) is correct since none is allocated when empty.
+    ctx.get_context().arg_buffer = nullptr;
   }
   int arg_size = sizeof(RuntimeContext *);
   void *ephemeral_context_ptr = nullptr;
@@ -648,19 +656,33 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
   // slot contents. No-op for kernels without checkpoints.
   prepare_streaming_checkpoint_state(ctx, launcher_ctx, offloaded_tasks);
 
-  // Per-launch RuntimeContext HtoD. On the persistent-scratch (default-stream) path the destination
-  // `runtime_context_dev_ptr` is stable and writes are ordered on the null stream, so we can skip the copy whenever
-  // the exact bytes we would send already sit in that buffer from a previous launch. We compare against the full
-  // struct we are about to upload (post-`prepare_streaming_checkpoint_state`, so any checkpoint_*_ptr mutation is
-  // included) and re-upload on any difference or if the device address changed (e.g. a grown arg-buffer moved the
-  // struct's `arg_buffer` pointer, or the context buffer itself was reallocated). The ephemeral (explicit-stream)
-  // path allocates a fresh buffer per launch and may run concurrently on pool streams, so it always uploads.
+  // Per-launch RuntimeContext HtoD. We only SKIP the copy on the default-stream fast path
+  // (`default_stream_path` == `active_stream == nullptr && all_sgid_zero`): there the destination
+  // `runtime_context_dev_ptr` is stable, the HtoD is null-stream ordered against the kernel dispatch, and
+  // same-handle launches are serialized on the host (the cache is a non-atomic std::vector + raw ptr, so this
+  // host-serialization is a required invariant - it holds because the skip path is null-stream only). We compare
+  // against the full struct we are about to upload (post-`prepare_streaming_checkpoint_state`, so any
+  // checkpoint_*_ptr mutation is included) and re-upload on any difference or if the device address changed (e.g. a
+  // grown arg-buffer moved the struct's `arg_buffer` pointer, or the context buffer itself was reallocated).
+  //
+  // The `active_stream == nullptr && !all_sgid_zero` case (parallel-group streams) still uses persistent scratch but
+  // runs kernels on acquired per-group streams, where a skipped null-stream HtoD would need a different visibility
+  // invariant than the null-stream narrative above; to stay strictly within the justification we do NOT skip there.
+  // We still refresh the cache after uploading so it always reflects the persistent buffer's current contents (a
+  // later default-stream launch then compares against accurate bytes). The ephemeral (explicit-stream) path allocates
+  // a fresh buffer per launch and may run concurrently on pool streams, so it always uploads and never caches.
+  //
+  // The compare is over the raw struct bytes (including padding holes and the value-initialized `cpu_thread_id`).
+  // This is correctness-safe - a spurious hit is impossible, since any meaningful field difference makes the memcmp
+  // non-zero - and the key is byte-stable because `RuntimeContext` is value-initialized at construction
+  // (`LaunchContextBuilder` builds it via `make_unique<RuntimeContext>()`), which zeroes padding and every scalar
+  // without an in-class initializer. Worst case a perturbed byte only costs a redundant re-upload, never a wrong skip.
   const auto *ctx_bytes = reinterpret_cast<const uint8_t *>(&ctx.get_context());
   if (use_persistent_scratch) {
-    const bool cache_hit = launcher_ctx.cached_runtime_context_ptr == context_pointer &&
-                           launcher_ctx.cached_runtime_context.size() == sizeof(RuntimeContext) &&
-                           std::memcmp(launcher_ctx.cached_runtime_context.data(), ctx_bytes,
-                                       sizeof(RuntimeContext)) == 0;
+    const bool cache_hit =
+        default_stream_path && launcher_ctx.cached_runtime_context_ptr == context_pointer &&
+        launcher_ctx.cached_runtime_context.size() == sizeof(RuntimeContext) &&
+        std::memcmp(launcher_ctx.cached_runtime_context.data(), ctx_bytes, sizeof(RuntimeContext)) == 0;
     if (!cache_hit) {
       AMDGPUDriver::get_instance().memcpy_host_to_device_async(context_pointer, &ctx.get_context(),
                                                                sizeof(RuntimeContext), active_stream);
