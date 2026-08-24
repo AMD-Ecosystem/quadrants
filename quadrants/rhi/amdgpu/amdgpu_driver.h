@@ -38,14 +38,14 @@ constexpr uint32 HIP_DEVICE_MINOR = 332 / 4;
 // offsetof(hipDeviceProp_t, minor) / 4
 constexpr uint32 HIP_DEVICE_MINOR_6 = 364 / 4;
 constexpr uint32 HIP_ERROR_ASSERT = 710;
-// hipErrorLaunchFailure — returned by the first hipStreamSynchronize after a device
+// hipErrorLaunchFailure - returned by the first hipStreamSynchronize after a device
 // __builtin_trap() (AMDGPU in-kernel assert path). Catchable; does not abort the process.
 constexpr uint32 HIP_ERROR_LAUNCH_FAILURE = 719;
 constexpr uint32 HIP_JIT_MAX_REGISTERS = 0;
 constexpr uint32 HIP_POINTER_ATTRIBUTE_MEMORY_TYPE = 2;
 constexpr uint32 HIP_SUCCESS = 0;
 constexpr uint32 HIP_MEMORYTYPE_DEVICE = 1;
-// hipHostMallocCoherent — required for host-visible reads of assert state after a trap.
+// hipHostMallocCoherent - required for host-visible reads of assert state after a trap.
 constexpr uint32 HIP_HOST_MALLOC_COHERENT = 0x40000000;
 
 // Optional hook invoked from AMDGPUFunction::operator() on HIP_ERROR_LAUNCH_FAILURE before the

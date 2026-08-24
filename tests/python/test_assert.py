@@ -181,7 +181,7 @@ def test_static_assert_nonstatic_condition():
 # Background: S_ENDPGM only kills the faulting wavefront, so peers waiting on s_barrier
 # deadlock the host on hipStreamSynchronize. Approach B uses __builtin_trap() + pinned
 # host assert state so the host can still format QuadrantsAssertionError after the trap
-# (HIP context is then dead — accepted debug-mode limitation).
+# (HIP context is then dead - accepted debug-mode limitation).
 #
 # Each case runs in a child *subprocess* (not fork: HIP is unsafe after fork) so a dead
 # context cannot poison sibling tests. Override the child interpreter with env
@@ -269,7 +269,7 @@ def test_amdgpu_assert_raises():
 
 @pytest.mark.skipif(not _amdgpu_available_for_assert_tests(), reason="AMDGPU not available/wanted")
 def test_amdgpu_assert_barrier_no_hang():
-    """One thread asserts while siblings hit block.sync — must raise, not hang."""
+    """One thread asserts while siblings hit block.sync - must raise, not hang."""
     _run_amdgpu_assert_child(
         """
         import quadrants as qd

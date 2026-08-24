@@ -645,8 +645,6 @@ void quadrants_assert_format(LLVMRuntime *runtime, u1 test, const char *format, 
   if (!runtime->error_code) {
     locked_task(&runtime->error_message_lock, [&] {
       if (!runtime->error_code) {
-        runtime->error_code = 1;  // Assertion failure
-
         memset(runtime->error_message_template, 0, quadrants_error_message_max_length);
         memcpy(runtime->error_message_template, format,
                std::min(quadrants_strlen(format), quadrants_error_message_max_length - 1));
@@ -667,7 +665,17 @@ void quadrants_assert_format(LLVMRuntime *runtime, u1 test, const char *format, 
           // Publish error_code last so a host that observes 1 also sees the message bytes.
           __atomic_store_n(&st->error_code, (i64)1, __ATOMIC_SEQ_CST);
         }
+        // Fence before flipping the device-side gate so any peer wave that later observes
+        // error_code == 1 is guaranteed to also see the published pinned payload above.
+        amdgpu_system_mem_fence();
 #endif
+        // Set the device-side gate last, after the pinned state is fully published. A peer wave that
+        // observes error_code == 1 skips this block and traps the whole dispatch; if the gate were set
+        // first (as before), that peer could trap while this wave is still copying, leaving the host to
+        // read an unpublished pinned buffer (error_code == 0) and surface a generic launch failure
+        // instead of QuadrantsAssertionError. Waves that still observe 0 block on error_message_lock
+        // until publication completes.
+        runtime->error_code = 1;  // Assertion failure
       }
     });
   }
@@ -677,7 +685,7 @@ void quadrants_assert_format(LLVMRuntime *runtime, u1 test, const char *format, 
 #elif ARCH_amdgpu
   // Trap the whole dispatch so peer wavefronts waiting on s_barrier do not hang the host
   // (the previous `S_ENDPGM` only killed the faulting wavefront). After the trap the HIP
-  // context is dead (`hipErrorLaunchFailure` on subsequent calls) — an accepted debug-mode
+  // context is dead (`hipErrorLaunchFailure` on subsequent calls) - an accepted debug-mode
   // limitation; the host surfaces QuadrantsAssertionError from the pinned state above.
   amdgpu_system_mem_fence();
   __builtin_trap();

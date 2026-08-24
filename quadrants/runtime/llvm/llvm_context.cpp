@@ -729,6 +729,13 @@ std::unique_ptr<llvm::Module> QuadrantsLLVMContext::module_from_file(const std::
           builder.CreateFence(llvm::AtomicOrdering::SequentiallyConsistent);
           builder.CreateRetVoid();
           QuadrantsLLVMContext::mark_inline(func);
+        } else {
+          // If the symbol name ever drifts, the runtime.cpp fallback (a host-atomic stub) is a no-op on device,
+          // which would silently break the publish-before-trap ordering the in-kernel assert path depends on.
+          // Warn loudly rather than fail so non-debug builds (which never trap) still run.
+          QD_WARN(
+              "amdgpu_system_mem_fence not found while patching the AMDGPU runtime module; the in-kernel assert "
+              "publish-before-trap fence will be a device no-op. QuadrantsAssertionError may not surface correctly.");
         }
       }
 

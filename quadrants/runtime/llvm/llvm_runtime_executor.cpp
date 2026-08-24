@@ -2,6 +2,7 @@
 #include "quadrants/program/adstack_size_expr_eval.h"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -49,12 +50,25 @@ void *host_allocate_aligned(HostMemoryPool *memory_pool, std::size_t size, std::
 }
 
 #if defined(QD_WITH_AMDGPU)
-// Layout-compatible with `AmdgpuAssertErrorState` in llvm_runtime.h (must stay in sync).
+// Layout-compatible with `AmdgpuAssertErrorState` in llvm_runtime.h (must stay in sync). The host TU cannot include
+// the device-runtime header, so both structs are pinned to the same canonical layout via the shared constants below;
+// a change to either that is not mirrored breaks one of these static_asserts.
 struct AmdgpuAssertErrorStateHostView {
   int64_t error_code;
   char error_message_template[quadrants_error_message_max_length];
   uint64_t error_message_arguments[quadrants_error_message_max_num_arguments];
 };
+
+static_assert(offsetof(AmdgpuAssertErrorStateHostView, error_code) == 0, "AmdgpuAssertErrorStateHostView layout drift");
+static_assert(offsetof(AmdgpuAssertErrorStateHostView, error_message_template) == sizeof(int64_t),
+              "AmdgpuAssertErrorStateHostView layout drift");
+static_assert(offsetof(AmdgpuAssertErrorStateHostView, error_message_arguments) ==
+                  sizeof(int64_t) + quadrants_error_message_max_length,
+              "AmdgpuAssertErrorStateHostView layout drift");
+static_assert(sizeof(AmdgpuAssertErrorStateHostView) ==
+                  sizeof(int64_t) + quadrants_error_message_max_length +
+                      quadrants_error_message_max_num_arguments * sizeof(uint64_t),
+              "AmdgpuAssertErrorStateHostView layout drift");
 
 // Host pointer published for the AMDGPU launch-failure hook (see amdgpu_driver.h). Only set while a
 // debug+amdgpu LlvmRuntimeExecutor owns a live pinned assert-error state.
