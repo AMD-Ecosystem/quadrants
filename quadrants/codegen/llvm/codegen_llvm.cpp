@@ -3245,13 +3245,15 @@ LLVMCompiledTask TaskCodeGenLLVM::run_compilation() {
     for (const auto &task : offloaded_tasks) {
       llvm::Function *func = module->getFunction(task.name);
       QD_ASSERT(func);
-      tlctx->mark_function_as_cuda_kernel(func, task.block_dim);
+      tlctx->mark_function_as_cuda_kernel(func, task.block_dim,
+                                          kernel->min_blocks_per_cu);
     }
   } else if (compile_config.arch == Arch::amdgpu) {
     for (const auto &task : offloaded_tasks) {
       llvm::Function *func = module->getFunction(task.name);
       QD_ASSERT(func);
-      tlctx->mark_function_as_amdgpu_kernel(func);
+      tlctx->mark_function_as_amdgpu_kernel(func, task.block_dim,
+                                            kernel->min_blocks_per_cu);
     }
 #if defined(QD_WITH_AMDGPU)
     llvm::legacy::FunctionPassManager fpm(module.get());

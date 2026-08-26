@@ -138,3 +138,25 @@ print(obs.frontend_constructs_cache_hit)   # how many were reused (always 0: eve
 ```
 
 All three fields are `-1` when the split did not run for this compile - either because the kernel took the whole-kernel fallback above, or because the compiled kernel was served from a cache (the [offline cache](init_options.md#offline_cache) or [fastcache](fastcache.md)) so no frontend ran at all.
+
+## Occupancy hint: `min_blocks_per_cu`
+
+`@qd.kernel` accepts an optional, portable occupancy hint:
+
+```python
+@qd.kernel(min_blocks_per_cu=2)
+def k():
+    ...
+```
+
+`min_blocks_per_cu` asks the scheduler to keep at least this many thread blocks (workgroups / CTAs) resident per compute unit (CU on AMDGPU, SM on CUDA). Raising it increases occupancy - more resident groups hide memory latency better - at the cost of fewer registers available per thread; setting it too high can force register spilling and *hurt* performance. It is most useful for memory-latency-bound kernels and typically neutral-to-negative for register-bound ones.
+
+The option is a cross-platform hint, not a platform-specific attribute:
+
+| Backend | Lowered to | Notes |
+|---------|-----------|-------|
+| CUDA | `minctasm` launch bound | Min CTAs resident per SM. Defaults to `2` when unset. |
+| AMDGPU | `amdgpu-waves-per-eu` (min) | Converted from blocks/CU to wavefronts/EU using the launch block size (wavefront size 64, 4 SIMDs/CU on CDNA3). |
+| CPU / Metal | ignored | No occupancy concept; the hint is a no-op. |
+
+`None` (the default) leaves each backend's default behavior unchanged. The value participates in both the fast cache and offline cache keys, so changing it forces a rebuild rather than reusing a stale compiled kernel.

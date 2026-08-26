@@ -188,6 +188,10 @@ std::string get_hashed_offline_cache_key(const CompileConfig &config,
   auto compile_config_key = get_offline_cache_key_of_compile_config(config);
   auto device_caps_key = get_offline_cache_key_of_device_caps(caps);
   std::string autodiff_mode = std::to_string(static_cast<std::size_t>(kernel->autodiff_mode));
+  // min_blocks_per_cu (set via @qd.kernel(min_blocks_per_cu=...)) changes the
+  // emitted occupancy attributes, so two otherwise-identical kernels that
+  // differ only by it must not collide in the offline cache.
+  std::string min_blocks_per_cu = std::to_string(kernel->min_blocks_per_cu);
   picosha2::hash256_one_by_one hasher;
   hasher.process(compile_config_key.begin(), compile_config_key.end());
   hasher.process(device_caps_key.begin(), device_caps_key.end());
@@ -195,6 +199,7 @@ std::string get_hashed_offline_cache_key(const CompileConfig &config,
   hasher.process(kernel_rets_string.begin(), kernel_rets_string.end());
   hasher.process(kernel_body_string.begin(), kernel_body_string.end());
   hasher.process(autodiff_mode.begin(), autodiff_mode.end());
+  hasher.process(min_blocks_per_cu.begin(), min_blocks_per_cu.end());
   hasher.finish();
 
   auto res = picosha2::get_hash_hex_string(hasher);

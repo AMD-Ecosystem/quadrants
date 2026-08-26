@@ -676,6 +676,8 @@ void export_lang(nb::module_ &m) {
       .def("insert_ret", &Kernel::insert_ret)
       .def("finalize_rets", &Kernel::finalize_rets)
       .def("finalize_params", &Kernel::finalize_params)
+      .def("set_min_blocks_per_cu",
+           [](Kernel *self, int v) { self->min_blocks_per_cu = v; })
       .def("make_launch_context", &Kernel::make_launch_context)
       .def(
           "ast_builder", [](Kernel *self) -> ASTBuilder * { return &self->context->builder(); },

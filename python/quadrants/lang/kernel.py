@@ -331,6 +331,9 @@ class Kernel(FuncBase):
         # converted at least as far as AST and front-end IR, but not necessarily any further.
         self.materialized_kernels: dict[CompiledKernelKeyType, KernelCxx] = {}
         self.has_print = False
+        # Cross-platform occupancy hint set via @qd.kernel(min_blocks_per_cu=...).
+        # None = backend default; forwarded to the C++ Kernel before codegen.
+        self.min_blocks_per_cu: int | None = None
         self.use_graph: bool = False
         # Opt-in flag set by `@qd.kernel(graph=True, checkpoints=True)`. When True, the AST transformer enables
         # `qd.checkpoint(...)` recognition AND auto-wraps every top-level for-loop that isn't already inside a `with
@@ -426,7 +429,9 @@ class Kernel(FuncBase):
         if self.runtime.src_ll_cache and self.quadrants_callable and self.quadrants_callable.is_pure:
             kernel_source_info, _src = get_source_info_and_src(self.func)
             self._kernel_source_info_cached = kernel_source_info  # reused by materialize / launch_kernel
-            self._l1_key = src_hasher.make_source_config_key(kernel_source_info)
+            self._l1_key = src_hasher.make_source_config_key(
+                kernel_source_info, min_blocks_per_cu=self.min_blocks_per_cu
+            )
 
             # Phase 1: L1 lookup - pruning info only, no args walk yet.
             pruning_paths, cached_graph_do_while_levels = src_hasher.load_pruning_info(self._l1_key)
@@ -586,6 +591,8 @@ class Kernel(FuncBase):
                 quadrants_kernel = impl.get_runtime().prog.create_kernel(
                     quadrants_ast_generator, kernel_name, self.autodiff_mode
                 )
+                if self.min_blocks_per_cu is not None:
+                    quadrants_kernel.set_min_blocks_per_cu(self.min_blocks_per_cu)
                 if _pass == 1:
                     assert key not in self.materialized_kernels
                     self.materialized_kernels[key] = quadrants_kernel

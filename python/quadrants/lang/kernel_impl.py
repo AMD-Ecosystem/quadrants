@@ -159,6 +159,7 @@ def _kernel_impl(
     verbose: bool = False,
     graph: bool = False,
     checkpoints: bool = False,
+    min_blocks_per_cu: int | None = None,
 ) -> QuadrantsCallable:
     # Can decorators determine if a function is being defined inside a class?
     # https://stackoverflow.com/a/8793684/12003165
@@ -171,6 +172,8 @@ def _kernel_impl(
     primal.use_graph = graph
     primal.use_checkpoints = checkpoints
     adjoint.use_checkpoints = checkpoints
+    primal.min_blocks_per_cu = min_blocks_per_cu
+    adjoint.min_blocks_per_cu = min_blocks_per_cu
     # Having |primal| contains |grad| makes the tape work.
     primal.grad = adjoint
 
@@ -213,7 +216,12 @@ def _kernel_impl(
 # TODO: This callable should be Callable[[F], F].
 # See comments below.
 def kernel(
-    _fn: None = None, *, pure: bool = False, graph: bool = False, checkpoints: bool = False
+    _fn: None = None,
+    *,
+    pure: bool = False,
+    graph: bool = False,
+    checkpoints: bool = False,
+    min_blocks_per_cu: int | None = None,
 ) -> Callable[[Any], Any]: ...
 
 
@@ -224,7 +232,14 @@ def kernel(
 # However, by making it return Any, we can make the pure parameter
 # change now, without breaking pyright.
 @overload
-def kernel(_fn: Any, *, pure: bool = False, graph: bool = False, checkpoints: bool = False) -> Any: ...
+def kernel(
+    _fn: Any,
+    *,
+    pure: bool = False,
+    graph: bool = False,
+    checkpoints: bool = False,
+    min_blocks_per_cu: int | None = None,
+) -> Any: ...
 
 
 def kernel(
@@ -234,6 +249,7 @@ def kernel(
     fastcache: bool = False,
     graph: bool = False,
     checkpoints: bool = False,
+    min_blocks_per_cu: int | None = None,
 ):
     """
     Marks a function as a Quadrants kernel.
@@ -254,6 +270,12 @@ def kernel(
             ``with qd.checkpoint(cp_id, yield_on=flag):`` blocks in the kernel body become pause points the host can
             resume from via ``kernel.resume(from_checkpoint=cp_id)``. Requires ``graph=True``.
             ``qd.checkpoint(...)`` in the body is rejected unless this flag is set.
+        min_blocks_per_cu: Optional occupancy hint. Requests that the scheduler keep at least this many
+            thread blocks (workgroups / CTAs) resident per compute unit (CU on AMDGPU, SM on CUDA). Higher
+            values increase occupancy (better latency hiding) at the cost of fewer registers per thread; too
+            high can force register spilling. ``None`` (default) leaves the backend default unchanged. This is
+            a portable hint: it lowers to ``amdgpu-waves-per-eu`` on AMDGPU and the ``minctasm`` launch bound
+            on CUDA, and is ignored on backends without an occupancy concept (CPU/Metal).
 
     Example::
 
@@ -278,7 +300,20 @@ def kernel(
                 f"@qd.kernel({fn.__name__!r}, checkpoints=True) requires graph=True; "
                 "the checkpoint resume model is only meaningful for graph kernels."
             )
-        wrapped = _kernel_impl(fn, level_of_class_stackframe=level, graph=graph, checkpoints=checkpoints)
+        if min_blocks_per_cu is not None and (
+            isinstance(min_blocks_per_cu, bool) or not isinstance(min_blocks_per_cu, int) or min_blocks_per_cu < 1
+        ):
+            raise QuadrantsSyntaxError(
+                f"@qd.kernel({fn.__name__!r}, min_blocks_per_cu={min_blocks_per_cu!r}) must be a "
+                "positive integer or None."
+            )
+        wrapped = _kernel_impl(
+            fn,
+            level_of_class_stackframe=level,
+            graph=graph,
+            checkpoints=checkpoints,
+            min_blocks_per_cu=min_blocks_per_cu,
+        )
         wrapped.is_pure = pure is not None and pure or fastcache
         if pure is not None:
             warnings_helper.warn_once(

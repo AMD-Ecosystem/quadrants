@@ -137,8 +137,15 @@ def _resolve_intenum_member(qualname: str | None, fallback: int | None) -> int |
     return fallback
 
 
-def make_source_config_key(kernel_source_info: FunctionSourceInfo) -> str:
-    """Build the L1 cache key: source + config + version, with no dependence on args."""
+def make_source_config_key(
+    kernel_source_info: FunctionSourceInfo, min_blocks_per_cu: int | None = None
+) -> str:
+    """Build the L1 cache key: source + config + version, with no dependence on args.
+
+    Occupancy (``min_blocks_per_cu``) is in L1 rather than L2: it changes emitted codegen
+    attributes without changing argument identity, so two kernels that differ only by the
+    hint must not share L1 or L2 entries.
+    """
     kernel_hash = function_hasher.hash_kernel(kernel_source_info)
     config_hash = config_hasher.hash_compile_config()
     # In L1 rather than L2: caps change codegen without changing argument identity.
@@ -154,6 +161,7 @@ def make_source_config_key(kernel_source_info: FunctionSourceInfo) -> str:
             str(kernel_source_info.start_lineno),
             "pruned",
             "kcov" if os.environ.get("QD_KERNEL_COVERAGE") == "1" else "",
+            f"mbpc={min_blocks_per_cu}",
             _CACHE_VALUE_SCHEMA_VERSION,
         )
     )

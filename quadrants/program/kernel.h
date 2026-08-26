@@ -18,6 +18,14 @@ class QD_DLL_EXPORT Kernel : public Callable {
 
   bool is_accessor{false};
 
+  // Cross-platform occupancy hint set via @qd.kernel(min_blocks_per_cu=...).
+  // Minimum number of thread blocks (workgroups on AMDGPU, CTAs on CUDA) the
+  // scheduler should try to keep resident per compute unit (CU on AMDGPU, SM
+  // on CUDA). Higher values raise occupancy (more latency hiding) at the cost
+  // of fewer registers per thread. 0 = unset (backend default). Lowered to
+  // "amdgpu-waves-per-eu" on AMDGPU and the "minctasm" nvvm annotation on CUDA.
+  int min_blocks_per_cu{0};
+
   Kernel(Program &program,
          const std::function<void()> &func,
          const std::string &name = "",

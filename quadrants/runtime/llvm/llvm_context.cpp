@@ -1026,7 +1026,9 @@ void QuadrantsLLVMContext::insert_nvvm_annotation(llvm::Function *func, std::str
   func->getParent()->getOrInsertNamedMetadata("nvvm.annotations")->addOperand(md_node);
 }
 
-void QuadrantsLLVMContext::mark_function_as_cuda_kernel(llvm::Function *func, int block_dim) {
+void QuadrantsLLVMContext::mark_function_as_cuda_kernel(llvm::Function *func,
+                                                        int block_dim,
+                                                        int min_blocks_per_cu) {
   // Mark kernel function as a CUDA __global__ function.
   // Use the ptx_kernel calling convention so the kernel marker survives
   // optimization passes (nvvm.annotations metadata gets stripped by O3).
@@ -1036,12 +1038,38 @@ void QuadrantsLLVMContext::mark_function_as_cuda_kernel(llvm::Function *func, in
   if (block_dim != 0) {
     // CUDA launch bounds
     insert_nvvm_annotation(func, "maxntidx", block_dim);
-    insert_nvvm_annotation(func, "minctasm", 2);
+    // "minctasm" = minimum CTAs (thread blocks) resident per SM, i.e. the
+    // occupancy floor. Configurable via @qd.kernel(min_blocks_per_cu=...);
+    // defaults to 2 when unset, preserving prior behavior.
+    insert_nvvm_annotation(func, "minctasm",
+                           min_blocks_per_cu > 0 ? min_blocks_per_cu : 2);
   }
 }
 
-void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(llvm::Function *func) {
+void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(llvm::Function *func,
+                                                          int block_dim,
+                                                          int min_blocks_per_cu) {
   func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+  // Cross-platform occupancy hint: keep at least |min_blocks_per_cu| thread
+  // blocks (workgroups) resident per CU. AMDGPU expresses occupancy as
+  // wavefronts per EU, and a CU has 4 SIMDs/EUs (wavefront size 64 on CDNA).
+  // Convert blocks/CU -> waves/EU: a block spans ceil(block_dim / 64) waves,
+  // so min waves/EU = ceil(min_blocks_per_cu * waves_per_block / 4).
+  if (min_blocks_per_cu > 0 && block_dim > 0) {
+    // Hardcoded wavefront size 64 and 4 SIMDs/CU match CDNA3 (gfx942); RDNA
+    // wave32 mode would need a runtime query. Revisit if Quadrants ever
+    // supports RDNA AMDGPU targets.
+    constexpr int kWavefrontSize = 64;
+    constexpr int kSimdsPerCu = 4;
+    int waves_per_block = (block_dim + kWavefrontSize - 1) / kWavefrontSize;
+    int min_waves_per_eu =
+        (min_blocks_per_cu * waves_per_block + kSimdsPerCu - 1) / kSimdsPerCu;
+    if (min_waves_per_eu < 1) {
+      min_waves_per_eu = 1;
+    }
+    // "amdgpu-waves-per-eu" = "Min[,Max]"; a lone value sets the minimum.
+    func->addFnAttr("amdgpu-waves-per-eu", std::to_string(min_waves_per_eu));
+  }
 }
 
 void QuadrantsLLVMContext::eliminate_unused_functions(llvm::Module *module,
