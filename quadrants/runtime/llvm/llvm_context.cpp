@@ -1056,11 +1056,17 @@ void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(llvm::Function *func,
   // Convert blocks/CU -> waves/EU: a block spans ceil(block_dim / 64) waves,
   // so min waves/EU = ceil(min_blocks_per_cu * waves_per_block / 4).
   if (min_blocks_per_cu > 0 && block_dim > 0) {
-    // Hardcoded wavefront size 64 and 4 SIMDs/CU match CDNA3 (gfx942); RDNA
-    // wave32 mode would need a runtime query. Revisit if Quadrants ever
-    // supports RDNA AMDGPU targets.
+    // Wavefront size 64 holds on every target Quadrants runs: jit_amdgpu.cpp
+    // forces wave64 codegen (+wavefrontsize64) on RDNA (gfx10+) hosts as well
+    // as CDNA. The 4 SIMDs/CU below is CDNA-specific (gfx9); RDNA has 2
+    // SIMDs/CU, so this hint under-provisions occupancy there (~half the
+    // requested blocks/CU). That path is unvalidated -- this PR is tuned and
+    // tested only on CDNA3 (gfx942) and CUDA -- so deriving SIMDs/CU from the
+    // mcpu subtarget is deferred to a follow-up with RDNA hardware to confirm
+    // the wave64-on-RDNA occupancy model. The hint is opt-in and never affects
+    // correctness (only how aggressively the register allocator packs waves).
     constexpr int kWavefrontSize = 64;
-    constexpr int kSimdsPerCu = 4;
+    constexpr int kSimdsPerCu = 4;  // CDNA3; see note above re: RDNA (2/CU).
     int waves_per_block = (block_dim + kWavefrontSize - 1) / kWavefrontSize;
     int min_waves_per_eu =
         (min_blocks_per_cu * waves_per_block + kSimdsPerCu - 1) / kSimdsPerCu;
