@@ -27,13 +27,10 @@ class KernelLauncher : public LLVM::KernelLauncher {
     std::size_t arg_buffer_capacity{0};
     void *runtime_context_dev_ptr{nullptr};
 
-    // Skip-redundant-H2D cache for the per-launch `RuntimeContext` upload (default-stream / persistent-scratch path
-    // only). The launcher re-sends the whole `RuntimeContext` struct to `runtime_context_dev_ptr` on every launch,
-    // but across repeated launches of the same handle its bytes are almost always identical (the device arg-buffer /
-    // runtime / result-buffer pointers are stable and only the rare checkpoint kernel mutates the checkpoint_*_ptr
-    // fields). We cache the last-uploaded bytes together with the device address they were written to, and skip the
-    // async HtoD whenever both still match. `std::vector<uint8_t>` (rather than a `RuntimeContext` by value) keeps
-    // the struct definition out of this header.
+    // Skip-redundant-H2D cache for the per-launch `RuntimeContext` upload (default-stream path only): cache the
+    // last-uploaded bytes plus the device address they went to, and skip the HtoD when both still match (the struct
+    // is almost always byte-identical across repeated same-handle launches). Bytes, not a `RuntimeContext`, to keep
+    // its definition out of this header.
     std::vector<uint8_t> cached_runtime_context;
     void *cached_runtime_context_ptr{nullptr};
 

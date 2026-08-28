@@ -600,12 +600,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
     AMDGPUDriver::get_instance().stream_synchronize(active_stream);
   }
   char *host_result_buffer = (char *)ctx.get_context().result_buffer;
-  // Point `result_buffer` at the persistent device buffer unconditionally. Result-producing kernels
-  // (result_buffer_size > 0) need this so the kernel writes land in device memory that the DtoH below reads back.
-  // Result-less kernels (size == 0) never touch the buffer, but pinning the field to the stable device address -
-  // instead of leaving the per-launch-varying host pointer that LaunchContextBuilder puts there - keeps the whole
-  // RuntimeContext byte-identical across launches, which is what lets the skip-redundant-H2D cache below hit. (A host
-  // pointer sitting in a device-visible field is also a latent hazard on AMDGPU, which has no UVA fallback.)
+  // Pin result_buffer to the persistent device buffer: result kernels need writes to land there for the DtoH below,
+  // and pinning unconditionally keeps RuntimeContext byte-stable for the skip-H2D cache below.
   ctx.get_context().result_buffer = (uint64 *)device_result_buffer;
   // Same explicit-stream race avoidance as the CUDA launcher: when active_stream != nullptr, allocate per-call
   // ephemeral buffers so concurrent launches on different streams can't clobber each other.
@@ -631,9 +627,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
                                                              ctx.arg_buffer_size, active_stream);
     ctx.get_context().arg_buffer = device_arg_buffer;
   } else {
-    // Arg-less kernels (arg_buffer_size == 0) never dereference arg_buffer. Pin it to nullptr instead of the
-    // per-launch host allocation LaunchContextBuilder leaves here, so RuntimeContext stays byte-stable and the
-    // skip-H2D cache below can hit. Mirrors the result_buffer pinning above.
+    // Arg-less kernels never dereference arg_buffer; pin to nullptr (as with result_buffer above) to keep the struct
+    // byte-stable for the skip-H2D cache.
     ctx.get_context().arg_buffer = nullptr;
   }
   int arg_size = sizeof(RuntimeContext *);
