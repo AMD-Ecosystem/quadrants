@@ -648,17 +648,12 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
   // slot contents. No-op for kernels without checkpoints.
   prepare_streaming_checkpoint_state(ctx, launcher_ctx, offloaded_tasks);
 
-  // Per-launch RuntimeContext HtoD. Skip it only on the default-stream fast path (active_stream == nullptr &&
-  // all_sgid_zero): there the destination is stable, the HtoD is null-stream ordered against the dispatch, and
-  // same-handle launches are host-serialized -- required, since the cache (non-atomic vector + raw ptr) has no
-  // other guard. Compare after prepare_streaming_checkpoint_state so checkpoint_*_ptr mutations are included, and
-  // re-upload if the device address moved (grown arg-buffer, reallocated context buffer).
+  // Per-launch RuntimeContext HtoD. A cache skips the copy when the struct bytes match the last upload.
   //
-  // Persistent-scratch launches on parallel-group streams re-upload but still refresh the cache, so a later
-  // default-stream launch compares against accurate bytes; ephemeral (explicit-stream) launches always upload.
+  // Only skip on the default-stream fast path. The cache is not thread-safe, and only this path serializes
+  // same-handle launches on the host and orders them on the null stream. Other paths always upload.
   //
-  // The compare is over raw struct bytes, so it relies on RuntimeContext being value-initialized (hence the
-  // cpu_thread_id in-class initializer). A byte mismatch only forces a redundant re-upload, never a wrong skip.
+  // The byte compare requires RuntimeContext to be value-initialized. A stale compare only costs a redundant upload.
   const auto *ctx_bytes = reinterpret_cast<const uint8_t *>(&ctx.get_context());
   if (use_persistent_scratch) {
     const bool cache_hit =
