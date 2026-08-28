@@ -1,4 +1,1 @@
-# Deprecation warning
-> [!CAUTION]
-> The ROCm/quadrants repository is retired, please use the [upstream](https://github.com/Genesis-Embodied-AI/quadrants) repository
->
+This fork exists to provide a place for AMD engineers to prototype features and from which to send PRs upstream. The default branch is not actively maintained or developed.
