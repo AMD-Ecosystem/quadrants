@@ -12,7 +12,6 @@ import pytest
 import quadrants as qd
 from quadrants.lang._fast_caching import src_hasher
 from quadrants.lang._wrap_inspect import get_source_info_and_src
-from quadrants.lang.misc import get_host_arch_list
 
 from tests import test_utils
 
@@ -61,23 +60,17 @@ def _plain_kernel_fn(x: qd.types.ndarray()):
 @test_utils.test(arch=qd.cpu)
 def test_min_blocks_per_cu_participates_in_cache_key():
     # Using one shared function object means the ONLY differing input to
-    # create_cache_key is min_blocks_per_cu, so distinct keys prove the hint
-    # participates (and equal values are stable) -- guarding against a kernel
+    # make_source_config_key is min_blocks_per_cu, so distinct L1 keys prove the
+    # hint participates (and equal values are stable) -- guarding against a kernel
     # compiled with one value silently reusing another value's cached binary.
     info, _src = get_source_info_and_src(_plain_kernel_fn)
 
     def key(mbpc):
-        return src_hasher.create_cache_key(
-            raise_on_templated_floats=False,
-            kernel_source_info=info,
-            args=(),
-            arg_metas=[],
-            min_blocks_per_cu=mbpc,
-        )
+        return src_hasher.make_source_config_key(info, min_blocks_per_cu=mbpc)
 
     k_none, k2, k4 = key(None), key(2), key(4)
 
-    # keys were actually produced (fastcache not skipped for this no-arg kernel)
+    # keys were actually produced
     assert k_none and k2 and k4
     # distinct values -> distinct keys
     assert len({k_none, k2, k4}) == 3

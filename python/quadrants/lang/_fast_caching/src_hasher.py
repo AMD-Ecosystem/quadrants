@@ -137,9 +137,7 @@ def _resolve_intenum_member(qualname: str | None, fallback: int | None) -> int |
     return fallback
 
 
-def make_source_config_key(
-    kernel_source_info: FunctionSourceInfo, min_blocks_per_cu: int | None = None
-) -> str:
+def make_source_config_key(kernel_source_info: FunctionSourceInfo, min_blocks_per_cu: int | None = None) -> str:
     """Build the L1 cache key: source + config + version, with no dependence on args.
 
     Occupancy (``min_blocks_per_cu``) is in L1 rather than L2: it changes emitted codegen
