@@ -255,7 +255,17 @@ struct AMDGPUConvertFuncParamAddressSpacePass : public ModulePass {
       auto new_func_type = llvm::FunctionType::get(func_type->getReturnType(), new_func_params, false);
       auto new_func = llvm::Function::Create(new_func_type, f->getLinkage(), f->getAddressSpace());
       new_func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
-      new_func->addFnAttr("amdgpu-flat-work-group-size", "1, 1024");
+      // Preserve the occupancy-related attributes that mark_function_as_amdgpu_kernel
+      // set during codegen. Reconstructing the kernel here (to convert pointer
+      // args to addrspace(1)) otherwise silently drops them, leaving
+      // "amdgpu-waves-per-eu" absent and the workgroup size at the permissive
+      // 1..1024 default -- which makes any occupancy hint non-binding.
+      if (f->hasFnAttribute("amdgpu-flat-work-group-size"))
+        new_func->addFnAttr(f->getFnAttribute("amdgpu-flat-work-group-size"));
+      else
+        new_func->addFnAttr("amdgpu-flat-work-group-size", "1, 1024");
+      if (f->hasFnAttribute("amdgpu-waves-per-eu"))
+        new_func->addFnAttr(f->getFnAttribute("amdgpu-waves-per-eu"));
       new_func->addFnAttr("target-cpu", "gfx" + AMDGPUContext::get_instance().get_mcpu().substr(3, 4));
       new_func->setComdat(f->getComdat());
       f->getParent()->getFunctionList().insert(f->getIterator(), new_func);

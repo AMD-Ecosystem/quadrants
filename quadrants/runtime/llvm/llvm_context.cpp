@@ -1076,6 +1076,12 @@ void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(llvm::Function *func,
     // "amdgpu-waves-per-eu" = "Min[,Max]"; a lone value sets the minimum.
     func->addFnAttr("amdgpu-waves-per-eu", std::to_string(min_waves_per_eu));
   }
+  // Pin the exact launch geometry so the occupancy hint is evaluated for the
+  // workgroup size that will actually be dispatched.
+  if (block_dim > 0) {
+    std::string wg_str = std::to_string(block_dim) + "," + std::to_string(block_dim);
+    func->addFnAttr("amdgpu-flat-work-group-size", wg_str);
+  }
 }
 
 void QuadrantsLLVMContext::eliminate_unused_functions(llvm::Module *module,

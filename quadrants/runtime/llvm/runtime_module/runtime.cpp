@@ -1793,6 +1793,13 @@ void cpu_parallel_range_for(RuntimeContext *context,
                         cpu_parallel_range_for_task);
 }
 
+#ifdef ARCH_amdgpu
+// Collapse the RangeForTaskFunc pointer indirection so the per-task body is
+// optimized in the kernel entry. In particular, this makes the occupancy
+// contract lowered from @qd.kernel(min_blocks_per_cu=...) apply to the actual
+// compute before AMDGPU register allocation.
+__attribute__((always_inline))
+#endif
 void gpu_parallel_range_for(RuntimeContext *context,
                             int begin,
                             int end,
