@@ -52,6 +52,9 @@ endif()
 target_link_libraries(${TESTS_NAME} PRIVATE quadrants_core)
 target_link_libraries(${TESTS_NAME} PRIVATE gtest_main)
 target_link_libraries(${TESTS_NAME} PRIVATE quadrants_common)
+# SPIR-V shader builders are compiled into the tests even when Vulkan is off.
+# spirv_codegen itself is always built; only the Vulkan/Metal backends opt into linking it.
+target_link_libraries(${TESTS_NAME} PRIVATE spirv_codegen)
 
 if (QD_WITH_BACKTRACE)
     target_link_libraries(${TESTS_NAME} PRIVATE ${BACKWARD_ENABLE})
