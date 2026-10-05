@@ -1132,6 +1132,12 @@ def _fastcache_checkpoint_child(args: list[str]) -> None:
         f"{args_obj.expect_loaded_from_fastcache!r}"
     )
 
+    # Flush the Program so KernelCompilationManager dumps the .qdc offline-cache
+    # artifact before this process exits. Without that, the Python-side fastcache
+    # entry is left without a matching compiled kernel and the next process cannot
+    # set cache_loaded=True for this data_oriented + graph + checkpoint kernel.
+    qd.reset()
+
     print(TEST_RAN)
     sys.exit(RET_SUCCESS)
 
