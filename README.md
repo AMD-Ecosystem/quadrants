@@ -84,14 +84,14 @@ pip install quadrants
 
 ## ROCm 10.0.0
 
-This branch builds Quadrants for AMD GPUs on ROCm 10.0.0. The image installs PyTorch `2.13.0+rocm10.0.0` and the Quadrants wheel compiled with AMDGPU on, and CUDA and Vulkan off. It keeps the C++ test binary and this source tree so the suites can run. It does not install Genesis. The base image is `rocm/dev-ubuntu-24.04:10.0.0-full`. The host kernel driver must match ROCm 10.
+This branch builds Quadrants for AMD GPUs on ROCm 10.1.0. The image installs PyTorch `2.13.0+rocm10.1.0` and the Quadrants wheel compiled with AMDGPU on, and CUDA and Vulkan off. It keeps the C++ test binary and this source tree so the suites can run. It does not install Genesis. The base image is `rocm/dev-ubuntu-24.04:10.1.0-full`. The host kernel driver must match ROCm 10.1.
 
 Clone this branch and build from the repository root:
 
 ```bash
-git clone -b rocm10.0.0_r26.10 https://github.com/AMD-Ecosystem/quadrants.git
+git clone -b rocm10.1.0_r26.10 https://github.com/AMD-Ecosystem/quadrants.git
 cd quadrants
-docker build -t quadrants-release-rocm10 .
+docker build -t quadrants-release-rocm10.1 .
 ```
 
 Run it on the AMD GPU. On a machine that also has a display GPU, set all three device variables to the CDNA device. That is GPU 0 on the machine used for this release. Do not set `QD_AMDGPU_V520`.
@@ -103,7 +103,7 @@ docker run --rm -it \
   -e HIP_VISIBLE_DEVICES=0 \
   -e ROCR_VISIBLE_DEVICES=0 \
   -e CUDA_VISIBLE_DEVICES=0 \
-  quadrants-release-rocm10
+  quadrants-release-rocm10.1
 ```
 
 With no command, the container prints the torch and Quadrants versions and exits. The working directory inside the container is `/src/quadrants`. The C++ test binary is `/opt/quadrants/quadrants_cpp_tests`.
@@ -119,7 +119,7 @@ docker run --rm \
   -e HIP_VISIBLE_DEVICES=0 \
   -e ROCR_VISIBLE_DEVICES=0 \
   -e CUDA_VISIBLE_DEVICES=0 \
-  quadrants-release-rocm10 \
+  quadrants-release-rocm10.1 \
   bash -lc 'export QD_LIB_DIR=$(python -c "import os, quadrants as qd; print(os.path.join(qd.__path__[0], \"_lib\", \"runtime\"))" | tail -n 1) && /opt/quadrants/quadrants_cpp_tests --gtest_filter="AMDGPU.*"'
 ```
 
@@ -132,7 +132,7 @@ docker run --rm \
   -e HIP_VISIBLE_DEVICES=0 \
   -e ROCR_VISIBLE_DEVICES=0 \
   -e CUDA_VISIBLE_DEVICES=0 \
-  quadrants-release-rocm10 \
+  quadrants-release-rocm10.1 \
   bash -lc 'export QD_LIB_DIR=$(python -c "import os, quadrants as qd; print(os.path.join(qd.__path__[0], \"_lib\", \"runtime\"))" | tail -n 1) && /opt/quadrants/quadrants_cpp_tests --gtest_filter="-AMDGPU.*"'
 ```
 
@@ -145,7 +145,7 @@ docker run --rm \
   -e HIP_VISIBLE_DEVICES=0 \
   -e ROCR_VISIBLE_DEVICES=0 \
   -e CUDA_VISIBLE_DEVICES=0 \
-  quadrants-release-rocm10 \
+  quadrants-release-rocm10.1 \
   bash -lc 'python tests/run_tests.py -t 4 -r 1 -v --arch amdgpu -m "not needs_torch"'
 ```
 
@@ -156,7 +156,7 @@ docker run --rm \
   -e HIP_VISIBLE_DEVICES=0 \
   -e ROCR_VISIBLE_DEVICES=0 \
   -e CUDA_VISIBLE_DEVICES=0 \
-  quadrants-release-rocm10 \
+  quadrants-release-rocm10.1 \
   bash -lc 'python tests/run_tests.py -t 4 -r 1 -v --arch amdgpu -m "needs_torch"'
 ```
 

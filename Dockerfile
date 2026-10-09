@@ -1,18 +1,18 @@
-# Quadrants on ROCm 10.0.0.
+# Quadrants on ROCm 10.1.0.
 #
 # Build from the root of this repository:
 #
-#   docker build -t quadrants-release-rocm10 .
+#   docker build -t quadrants-release-rocm10.1 .
 #
 # The build clones this release branch and its submodules. Override that
 # checkout with:
 #
 #   docker build \
 #     --build-arg QUADRANTS_REPO=https://github.com/AMD-Ecosystem/quadrants.git \
-#     --build-arg QUADRANTS_REF=rocm10.0.0_r26.10 \
-#     -t quadrants-release-rocm10 .
+#     --build-arg QUADRANTS_REF=rocm10.1.0_r26.10 \
+#     -t quadrants-release-rocm10.1 .
 #
-# Run on a host whose kernel driver matches ROCm 10, with the GPU devices passed in:
+# Run on a host whose kernel driver matches ROCm 10.1, with the GPU devices passed in:
 #
 #   docker run --rm -it \
 #     --device=/dev/kfd --device=/dev/dri \
@@ -20,18 +20,18 @@
 #     -e HIP_VISIBLE_DEVICES=0 \
 #     -e ROCR_VISIBLE_DEVICES=0 \
 #     -e CUDA_VISIBLE_DEVICES=0 \
-#     quadrants-release-rocm10
+#     quadrants-release-rocm10.1
 #
-# The base image supplies the ROCm 10 userspace (/opt/rocm). Quadrants is compiled
+# The base image supplies the ROCm 10.1 userspace (/opt/rocm). Quadrants is compiled
 # in the build stage with C++ tests on. The final image keeps the virtualenv,
 # quadrants_cpp_tests, and this Quadrants tree. It does not install Genesis.
 
-ARG ROCM_IMAGE=rocm/dev-ubuntu-24.04:10.0.0-full@sha256:a90cf047f615abe70fbef83c64def0a2d549ef37a39c8ea545430aba4981b374
+ARG ROCM_IMAGE=rocm/dev-ubuntu-24.04:10.1.0-full@sha256:5ed1362ea542a928651e4c710b44024ebe98870f74159cb70f0265aec8ef0abe
 
 FROM ${ROCM_IMAGE} AS build
 
 ARG QUADRANTS_REPO=https://github.com/AMD-Ecosystem/quadrants.git
-ARG QUADRANTS_REF=rocm10.0.0_r26.10
+ARG QUADRANTS_REF=rocm10.1.0_r26.10
 
 ENV DEBIAN_FRONTEND=noninteractive \
     VIRTUAL_ENV=/opt/venv \
@@ -77,7 +77,7 @@ RUN git submodule update --init --recursive \
     && test -x /opt/quadrants/quadrants_cpp_tests
 
 RUN pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ \
-        "torch[device-all]==2.13.0+rocm10.0.0" \
+        "torch[device-all]==2.13.0+rocm10.1.0" \
     && pip install /src/quadrants/dist/quadrants-*.whl \
     && pip install --group test \
     && rm -rf /src/quadrants/build /src/quadrants/dist
