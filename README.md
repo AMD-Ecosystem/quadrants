@@ -82,7 +82,7 @@ pip install quadrants
 
 (For how to build from source, see our CI build scripts, e.g. [linux build scripts](.github/workflows/scripts_new/linux_x86/) )
 
-## ROCm 10.0.0
+## ROCm 10.1.0
 
 This branch builds Quadrants for AMD GPUs on ROCm 10.1.0. The image installs PyTorch `2.13.0+rocm10.1.0` and the Quadrants wheel compiled with AMDGPU on, and CUDA and Vulkan off. It keeps the C++ test binary and this source tree so the suites can run. It does not install Genesis. The base image is `rocm/dev-ubuntu-24.04:10.1.0-full`. The host kernel driver must match ROCm 10.1.
 
