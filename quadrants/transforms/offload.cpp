@@ -402,7 +402,8 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
     auto ret = global_offset_;
     if (type->is<TensorType>()) {
       auto tensor_type = type->cast<TensorType>();
-      global_offset_ += tensor_type->get_num_elements() * data_type_size(tensor_type->get_element_type());
+      global_offset_ += static_cast<std::size_t>(tensor_type->get_num_elements()) *
+                        static_cast<std::size_t>(data_type_size(tensor_type->get_element_type()));
       // TODO: do we need to align this?
     } else {
       std::size_t type_size = data_type_size(type);

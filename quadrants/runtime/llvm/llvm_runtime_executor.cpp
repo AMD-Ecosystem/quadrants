@@ -38,6 +38,14 @@ void assert_failed_host(const char *msg) {
   QD_ERROR("Assertion failure: {}", msg);
 }
 
+// The allocation pointer is a uint64_t *. Filling it as uint32_t words is the
+// CPU counterpart of memsetd32. The void * parameter keeps that conversion
+// from being mixed-width pointer arithmetic on the original pointer.
+void fill_u32_words(void *dst, std::size_t count, uint32_t value) {
+  auto *words = static_cast<uint32_t *>(dst);
+  std::fill(words, words + count, value);
+}
+
 void *host_allocate_aligned(HostMemoryPool *memory_pool, std::size_t size, std::size_t alignment) {
   return memory_pool->allocate(size, alignment);
 }
@@ -467,7 +475,7 @@ void LlvmRuntimeExecutor::fill_ndarray(const DeviceAllocation &alloc, std::size_
     QD_NOT_IMPLEMENTED;
 #endif
   } else {
-    std::fill((uint32_t *)ptr, (uint32_t *)ptr + size, data);
+    fill_u32_words(ptr, size, data);
   }
 }
 

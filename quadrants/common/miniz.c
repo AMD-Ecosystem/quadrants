@@ -3268,7 +3268,13 @@ static void mz_zip_time_t_to_dos_time(MZ_TIME_T time, mz_uint16 *pDOS_time, mz_u
     return;
   }
 #else
-  struct tm *tm = localtime(&time);
+  struct tm tm_struct;
+  struct tm *tm = &tm_struct;
+  if (localtime_r(&time, tm) == NULL) {
+    *pDOS_date = 0;
+    *pDOS_time = 0;
+    return;
+  }
 #endif /* #ifdef _MSC_VER */
 
   *pDOS_time = (mz_uint16)(((tm->tm_hour) << 11) + ((tm->tm_min) << 5) + ((tm->tm_sec) >> 1));

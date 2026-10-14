@@ -1055,7 +1055,8 @@ class ScalarizePointers : public BasicStmtVisitor {
       auto global_temp_stmt = stmt->origin->as<GlobalTemporaryStmt>();
       auto offset_0 = global_temp_stmt->offset;
       auto offset_1 = stmt->offset->as<ConstStmt>()->val.val_int32();
-      auto new_offset = offset_0 + offset_1 * data_type_size(stmt->ret_type.ptr_removed());
+      auto new_offset = offset_0 + static_cast<std::size_t>(offset_1) *
+                                       static_cast<std::size_t>(data_type_size(stmt->ret_type.ptr_removed()));
 
       auto new_global_temp_stmt =
           std::make_unique<GlobalTemporaryStmt>(new_offset, stmt->ret_type.ptr_removed().get_element_type());
@@ -1080,7 +1081,8 @@ class ScalarizePointers : public BasicStmtVisitor {
       auto thread_local_stmt = stmt->origin->as<ThreadLocalPtrStmt>();
       auto offset_0 = thread_local_stmt->offset;
       auto offset_1 = stmt->offset->as<ConstStmt>()->val.val_int32();
-      auto new_offset = offset_0 + offset_1 * data_type_size(stmt->ret_type.ptr_removed());
+      auto new_offset = offset_0 + static_cast<std::size_t>(offset_1) *
+                                       static_cast<std::size_t>(data_type_size(stmt->ret_type.ptr_removed()));
 
       auto new_thread_local_stmt =
           std::make_unique<ThreadLocalPtrStmt>(new_offset, stmt->ret_type.ptr_removed().get_element_type());

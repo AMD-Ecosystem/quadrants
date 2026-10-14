@@ -118,7 +118,7 @@ std::string TensorType::to_string() const {
 }
 
 size_t TensorType::get_element_offset(int ind) const {
-  return data_type_size(element_) * ind;
+  return static_cast<size_t>(data_type_size(element_)) * static_cast<size_t>(ind);
 }
 
 const Type *TensorType::get_type() const {

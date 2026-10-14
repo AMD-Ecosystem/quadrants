@@ -9,6 +9,10 @@
 #include <assert.h>
 #include <cstring>
 #include <fstream>
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include <iostream>
 #include <map>
 #include <memory>
@@ -253,7 +257,16 @@ inline std::vector<uint8_t> read_data_from_file(const std::string &fn) {
 }
 
 inline void write_data_to_file(const std::string &fn, uint8_t *data, std::size_t size) {
+#if defined(_WIN32)
   std::FILE *f = fopen(fn.c_str(), "wb");
+#else
+  // 0644, not the 0666 fopen uses before umask, so the file is not world-writable.
+  int fd = ::open(fn.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  std::FILE *f = fd >= 0 ? ::fdopen(fd, "wb") : nullptr;
+  if (f == nullptr && fd >= 0) {
+    ::close(fd);
+  }
+#endif
   if (f == nullptr) {
     QD_ERROR("Cannot open file [{}] for writing. (Does the directory exist?)", fn);
     QD_ASSERT(f != nullptr);

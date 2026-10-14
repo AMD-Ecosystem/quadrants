@@ -15784,7 +15784,7 @@ namespace Catch {
 #ifdef _MSC_VER
         sprintf_s(buffer, "%.3f", duration);
 #else
-        std::sprintf(buffer, "%.3f", duration);
+        std::snprintf(buffer, sizeof(buffer), "%.3f", duration);
 #endif
         return std::string(buffer);
     }
@@ -16812,22 +16812,16 @@ namespace Catch {
             std::time(&rawtime);
             auto const timeStampSize = sizeof("2017-01-16T17:06:45Z");
 
-#ifdef _MSC_VER
             std::tm timeInfo = {};
+#ifdef _MSC_VER
             gmtime_s(&timeInfo, &rawtime);
 #else
-            std::tm* timeInfo;
-            timeInfo = std::gmtime(&rawtime);
+            gmtime_r(&rawtime, &timeInfo);
 #endif
 
             char timeStamp[timeStampSize];
-            const char * const fmt = "%Y-%m-%dT%H:%M:%SZ";
-
-#ifdef _MSC_VER
+            const char *const fmt = "%Y-%m-%dT%H:%M:%SZ";
             std::strftime(timeStamp, timeStampSize, fmt, &timeInfo);
-#else
-            std::strftime(timeStamp, timeStampSize, fmt, timeInfo);
-#endif
             return std::string(timeStamp, timeStampSize-1);
         }
 

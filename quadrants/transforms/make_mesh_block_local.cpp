@@ -443,7 +443,8 @@ MakeMeshBlockLocal::MakeMeshBlockLocal(OffloadedStmt *offload, const CompileConf
     bls_offset_in_bytes_ += (mapping_dtype_size_ - bls_offset_in_bytes_ % mapping_dtype_size_) % mapping_dtype_size_;
     mapping_bls_offset_in_bytes_ = bls_offset_in_bytes_;
     // allocate storage for the BLS variable
-    bls_offset_in_bytes_ += mapping_dtype_size_ * offload->mesh->patch_max_element_num.find(element_type)->second;
+    bls_offset_in_bytes_ += static_cast<std::size_t>(mapping_dtype_size_) *
+                            static_cast<std::size_t>(offload->mesh->patch_max_element_num.find(element_type)->second);
 
     // Step 3-1:
     // Fetch index mapping to the BLS block

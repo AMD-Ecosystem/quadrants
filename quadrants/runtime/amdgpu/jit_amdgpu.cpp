@@ -7,6 +7,13 @@
 
 #include <fstream>
 #include <cstdlib>
+#if defined(QD_WITH_AMDGPU)
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+// Declared here so it is the process environment, not a Quadrants namespace variable.
+extern "C" char **environ;
+#endif
 
 namespace quadrants {
 namespace lang {
@@ -204,9 +211,14 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(std::unique_ptr<llvm::Modu
     }
   }
 
-  std::string lld_cmd = lld_executable + " -shared " + obj_path + " -o " + hsaco_path;
-  QD_TRACE("Linking with command: {}", lld_cmd);
-  if (std::system(lld_cmd.c_str()))
+  // Pass arguments directly. A shell command would interpret metacharacters in
+  // ROCM_PATH and QD_TMP_DIR.
+  const char *lld_argv[] = {lld_executable.c_str(), "-shared", obj_path.c_str(), "-o", hsaco_path.c_str(), nullptr};
+  QD_TRACE("Linking with ld.lld: {} -shared {} -o {}", lld_executable, obj_path, hsaco_path);
+  pid_t pid = 0;
+  int spawn_rc = ::posix_spawnp(&pid, lld_argv[0], nullptr, nullptr, const_cast<char *const *>(lld_argv), environ);
+  int status = 0;
+  if (spawn_rc != 0 || ::waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
     QD_ERROR(
         fmt::format("Generate {} Error. Make sure ld.lld is available in your "
                     "ROCm installation, and add path to ROCm path to ROCM_PATH "

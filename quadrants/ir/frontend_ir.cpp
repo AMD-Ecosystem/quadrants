@@ -679,7 +679,10 @@ Stmt *make_tensor_access_single_element(Expression::FlattenContext *ctx,
   } else {
     int offset = 0;
     for (int i = 0; i < (int)indices.size(); ++i) {
-      offset = offset * shape[i] + indices[i].cast<ConstExpression>()->val.val_int();
+      // Multiply in int64 so the product is not computed in int and then widened.
+      int64 wide =
+          static_cast<int64>(offset) * static_cast<int64>(shape[i]) + indices[i].cast<ConstExpression>()->val.val_int();
+      offset = static_cast<int>(wide);
     }
     offset_stmt = ctx->push_back<ConstStmt>(TypedConstant(offset));
   }
