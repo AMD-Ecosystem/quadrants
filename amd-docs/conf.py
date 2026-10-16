@@ -11,7 +11,7 @@ flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-develope
 '''
 html_theme = "rocm_docs_theme"
 html_theme_options = {
-    "flavor": "rocm-llmext",
+    "flavor": "rocm-simulation",
     "repository_url": "https://github.com/AMD-Ecosystem/quadrants",
     "repository_branch": "docs/26.10",
     "path_to_docs": "amd-docs",
