@@ -1,9 +1,13 @@
+#include <cstring>
 #include <optional>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 #include "gtest/gtest.h"
 #include "quadrants/common/core.h"
+#include "quadrants/common/serialization.h"
 #include "quadrants/ir/type_factory.h"
 
 namespace quadrants::lang {
@@ -250,6 +254,36 @@ TEST(Serialization, JsonSerde) {
   t = Foo{};
   deserialize(parse(kExtraFieldJson), t, false);  // no exception
   EXPECT_EQ(foo, t);
+}
+
+// The CodeQL file-create fix opens with mode 0644, so the result is not group or
+// world writable. The .qdb.zip path then goes through miniz, which is the localtime_r change.
+TEST(Serialization, CodeQlCreateModeAndZipTimestamp) {
+  const std::string dir = "/tmp";
+  const std::string qdb = dir + "/quadrants-codeql-" + std::to_string(::getpid()) + ".qdb";
+  const std::string zip = qdb + ".zip";
+  std::remove(qdb.c_str());
+  std::remove(zip.c_str());
+
+  uint8_t payload[] = {1, 2, 3, 4, 5};
+  quadrants::write_data_to_file(qdb, payload, sizeof(payload));
+
+  struct stat st {};
+  ASSERT_EQ(::stat(qdb.c_str(), &st), 0);
+  EXPECT_EQ(st.st_mode & 022, 0u);
+  EXPECT_NE(st.st_mode & 0200, 0u);
+
+  auto stored = quadrants::read_data_from_file(qdb);
+  ASSERT_EQ(stored.size(), sizeof(payload));
+  EXPECT_EQ(0, std::memcmp(stored.data(), payload, sizeof(payload)));
+
+  quadrants::write_data_to_file(zip, payload, sizeof(payload));
+  auto unzipped = quadrants::zip::read(zip, false);
+  ASSERT_EQ(unzipped.size(), sizeof(payload));
+  EXPECT_EQ(0, std::memcmp(unzipped.data(), payload, sizeof(payload)));
+
+  std::remove(qdb.c_str());
+  std::remove(zip.c_str());
 }
 
 }  // namespace
