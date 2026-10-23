@@ -11,7 +11,7 @@ Quadrants on ROCm installation
 System requirements
 ====================================================================
 
-To use Quadrants `1.3.3 <https://github.com/Genesis-Embodied-AI/quadrants/releases/tag/v1.3.3>`__, you need the following prerequisites:
+To use Quadrants `1.3.3 <https://github.com/AMD-Ecosystem/quadrants/tree/rocm10.1.0_r26.10>`__, you need the following prerequisites:
 
 - **ROCm version:** `10.1.0 <https://rocm.docs.amd.com/en/docs-10.1.0/>`__
 - **Operating system:** Ubuntu 24.04
