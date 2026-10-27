@@ -68,7 +68,8 @@ Test Quadrants
 ====================================================================
 
 Inside that shell, set the C++ runtime path once, then run the four suites in this order.
-Importing Quadrants prints a banner, so ``QD_LIB_DIR`` is the last line of that command.
+Importing Quadrants prints a banner, so ``QD_LIB_DIR`` takes the last line of the command
+output (``tail -n 1``).
 
 .. code-block:: bash
 

@@ -9,7 +9,7 @@ What is Quadrants?
 ********************************************************************
 
 Quadrants is a multi-platform compiler for physics simulation. You write kernels in
-Python. Quadrants lowers them to parallel code for NVIDIA CUDA, AMD ROCm (HIP),
+Python. Quadrants lowers them to parallel code for AMD ROCm (HIP),
 Vulkan (SPIR-V), Apple Metal, and x86 and ARM64 CPUs. Genesis uses it for the numeric
 kernels inside its solvers, collision code, and linear algebra.
 
@@ -27,7 +27,7 @@ Quadrants exists so a physics engine can keep one kernel language and still run 
 machines researchers actually have:
 
 - **One kernel source, several backends:** A function marked ``@qd.kernel`` or ``@qd.func``
-  is the source of the CUDA, AMDGPU, Metal, Vulkan, and CPU programs. Switching backends
+  is the source of the AMDGPU, Metal, Vulkan, and CPU programs. Switching backends
   does not mean rewriting the solver.
 
 - **Built for large batched simulation:** The compiler's layout types, cache, and GPU graphs
@@ -50,7 +50,7 @@ Quadrants provides the following features:
   ``qd.Tensor`` hold simulation state. Dataclass structs pass through ``qd.func`` with no
   extra kernel-runtime cost. ``BufferView`` is a bounds-checked window onto an ndarray.
 
-- **AMDGPU, CUDA, Metal, Vulkan, and CPU backends:** The ROCm 10.1 image enables AMDGPU and
+- **AMDGPU, Metal, Vulkan, and CPU backends:** The ROCm 10.1 image enables AMDGPU and
   leaves CUDA and Vulkan off. The same source can target the other architectures in a build
   that turns them on.
 
@@ -58,14 +58,14 @@ Quadrants provides the following features:
   been compiled. GPU graphs capture a sequence of kernels so a step is one launch.
   ``perf_dispatch`` times alternate implementations and keeps the faster one.
 
-- **SIMT building blocks:** Subgroup shuffle and reductions cover CUDA, AMDGPU, Metal, and
+- **SIMT building blocks:** Subgroup shuffle and reductions cover AMDGPU, Metal, and
   Vulkan. Tile types keep 16x16 and 32x32 matrices in registers for blocked factorizations.
 
 - **Autodiff:** Reverse-mode differentiation, including dynamic loops, plus forward mode,
   custom gradients, and a tape.
 
 - **PyTorch interop:** ``to_torch(copy=False)`` and ``to_numpy(copy=False)`` use DLPack on
-  CUDA, CPU, AMDGPU, and Metal, and a torch tensor can be passed into a kernel.
+  CPU, AMDGPU, and Metal, and a torch tensor can be passed into a kernel.
 
 - **A Python interpreter for kernels:** ``qd.init(qd.python)`` runs a kernel as ordinary
   Python so it can be stepped through in a debugger.
@@ -80,7 +80,7 @@ Quadrants is commonly used in the following scenarios:
   ``quadrants-release-rocm10.1``, is enough to compile and run kernels without Genesis.
 
 - **Portable physics code:** A prototype written once can be checked on a CPU, then on an
-  AMD or NVIDIA GPU, by changing the architecture passed to ``qd.init``.
+  AMD GPU, by changing the architecture passed to ``qd.init``.
 
 - **Differentiable simulation:** Reverse-mode autodiff through a kernel is how a caller gets
   gradients without hand-writing an adjoint.

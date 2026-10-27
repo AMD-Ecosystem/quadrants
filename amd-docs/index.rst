@@ -12,7 +12,7 @@ Use Quadrants on ROCm to compile Python physics kernels for AMD Instinct GPUs.
 A kernel written once lowers to parallel code for the selected architecture.
 
 Quadrants is a multi-platform compiler for physics simulation. You write kernels in
-Python. Quadrants lowers them to parallel code for NVIDIA CUDA, AMD ROCm (HIP),
+Python. Quadrants lowers them to parallel code for AMD ROCm (HIP),
 Vulkan (SPIR-V), Apple Metal, and x86 and ARM64 CPUs. Genesis uses it for the numeric
 kernels inside its solvers, collision code, and linear algebra.
 
