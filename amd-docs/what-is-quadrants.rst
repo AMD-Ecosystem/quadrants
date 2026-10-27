@@ -13,8 +13,8 @@ Python. Quadrants lowers them to parallel code for NVIDIA CUDA, AMD ROCm (HIP),
 Vulkan (SPIR-V), Apple Metal, and x86 and ARM64 CPUs. Genesis uses it for the numeric
 kernels inside its solvers, collision code, and linear algebra.
 
-The project was forked from Taichi in June 2025 and is now an independent compiler.
-It does not aim to stay compatible with upstream Taichi. Development is led by Genesis AI.
+The project was forked from Taichi Lang and is now an independent compiler.
+It does not aim to stay compatible with upstream Taichi Lang, as development is led by Genesis AI.
 This ROCm edition is the
 `rocm10.1.0_r26.10 <https://github.com/AMD-Ecosystem/quadrants/tree/rocm10.1.0_r26.10>`__
 branch of `AMD-Ecosystem/quadrants <https://github.com/AMD-Ecosystem/quadrants>`__.
