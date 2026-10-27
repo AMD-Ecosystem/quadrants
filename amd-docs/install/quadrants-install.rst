@@ -15,7 +15,7 @@ To use Quadrants `1.3.3 <https://github.com/AMD-Ecosystem/quadrants/tree/rocm10.
 
 - **ROCm version:** `10.1.0 <https://rocm.docs.amd.com/en/docs-10.1.0/>`__
 - **Operating system:** Ubuntu 24.04
-- **GPU platform:** AMD Instinct™ MI300X, MI350X and MI355X
+- **GPU platform:** AMD Instinct™ MI300X, MI350X, and MI355X
 - **Python:** `3.12 <https://www.python.org/downloads/release/python-31215/>`__
 
 Install Quadrants
