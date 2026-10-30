@@ -8,19 +8,19 @@
 Quadrants on ROCm documentation
 ********************************************************************
 
+Quadrants is a multi-platform compiler for physics simulation. You write kernels in
+Python and Quadrants lowers them to parallel code for AMD ROCm (HIP),
+Vulkan (SPIR-V), Apple Metal, and x86 and ARM64 CPUs. `Genesis <https://rocm.docs.amd.com/projects/genesis/en/docs-26.10/>`__ uses it for the numeric
+kernels inside its solvers, collision code, and linear algebra.
+
 Use Quadrants on ROCm to compile Python physics kernels for AMD Instinct GPUs.
 A kernel written once lowers to parallel code for the selected architecture.
-
-Quadrants is a multi-platform compiler for physics simulation. You write kernels in
-Python. Quadrants lowers them to parallel code for AMD ROCm (HIP),
-Vulkan (SPIR-V), Apple Metal, and x86 and ARM64 CPUs. Genesis uses it for the numeric
-kernels inside its solvers, collision code, and linear algebra.
 
 The project was forked from `Taichi Lang <https://rocm.docs.amd.com/projects/taichi/en/latest/what-is-taichi.html>`__
 and is now an independent compiler. It does not aim to stay compatible with upstream Taichi Lang,
 as development is led by Genesis AI. This ROCm edition is the
 `rocm10.1.0_r26.10 <https://github.com/AMD-Ecosystem/quadrants/tree/rocm10.1.0_r26.10>`__
-branch of `AMD-Ecosystem/quadrants <https://github.com/AMD-Ecosystem/quadrants>`__.
+branch of AMD-Ecosystem/quadrants.
 
 The Quadrants public repository is located at
 `https://github.com/AMD-Ecosystem/quadrants <https://github.com/AMD-Ecosystem/quadrants>`__.

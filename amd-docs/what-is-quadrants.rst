@@ -9,8 +9,8 @@ What is Quadrants?
 ********************************************************************
 
 Quadrants is a multi-platform compiler for physics simulation. You write kernels in
-Python. Quadrants lowers them to parallel code for AMD ROCm (HIP),
-Vulkan (SPIR-V), Apple Metal, and x86 and ARM64 CPUs. Genesis uses it for the numeric
+Python and Quadrants lowers them to parallel code for AMD ROCm (HIP),
+Vulkan (SPIR-V), Apple Metal, and x86 and ARM64 CPUs. `Genesis <https://rocm.docs.amd.com/projects/genesis/en/docs-26.10/>`__ uses it for the numeric
 kernels inside its solvers, collision code, and linear algebra.
 
 The project was forked from `Taichi Lang <https://rocm.docs.amd.com/projects/taichi/en/latest/what-is-taichi.html>`__
@@ -18,7 +18,7 @@ and is now an independent compiler. It does not aim to stay compatible with upst
 as development is led by Genesis AI. This ROCm edition is the
 `rocm10.1.0_r26.10 <https://github.com/AMD-Ecosystem/quadrants/tree/rocm10.1.0_r26.10>`__
 branch of `AMD-Ecosystem/quadrants <https://github.com/AMD-Ecosystem/quadrants>`__.
-The user guide is at `genesis-embodied-ai.github.io/quadrants <https://genesis-embodied-ai.github.io/quadrants/index.html>`__.
+The user guide can be found at `genesis-embodied-ai.github.io/quadrants <https://genesis-embodied-ai.github.io/quadrants/index.html>`__.
 
 Why Quadrants?
 ====================================================================
