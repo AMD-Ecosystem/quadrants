@@ -16,9 +16,8 @@ kernels inside its solvers, collision code, and linear algebra.
 The project was forked from `Taichi Lang <https://rocm.docs.amd.com/projects/taichi/en/latest/what-is-taichi.html>`__
 and is now an independent compiler. It does not aim to stay compatible with upstream Taichi Lang,
 as development is led by Genesis AI. This ROCm edition is the
-`rocm10.1.0_r26.10 <https://github.com/AMD-Ecosystem/quadrants/tree/rocm10.1.0_r26.10>`__
-branch of `AMD-Ecosystem/quadrants <https://github.com/AMD-Ecosystem/quadrants>`__.
-The user guide can be found at `genesis-embodied-ai.github.io/quadrants <https://genesis-embodied-ai.github.io/quadrants/index.html>`__.
+`https://github.com/AMD-Ecosystem/quadrants/tree/rocm10.1.0_r26.10 <https://github.com/AMD-Ecosystem/quadrants/tree/rocm10.1.0_r26.10>`__
+branch. The user guide can be found at `genesis-embodied-ai.github.io/quadrants <https://genesis-embodied-ai.github.io/quadrants/index.html>`__.
 
 Why Quadrants?
 ====================================================================

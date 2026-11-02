@@ -19,8 +19,8 @@ A kernel written once lowers to parallel code for the selected architecture.
 The project was forked from `Taichi Lang <https://rocm.docs.amd.com/projects/taichi/en/latest/what-is-taichi.html>`__
 and is now an independent compiler. It does not aim to stay compatible with upstream Taichi Lang,
 as development is led by Genesis AI. This ROCm edition is the
-`rocm10.1.0_r26.10 <https://github.com/AMD-Ecosystem/quadrants/tree/rocm10.1.0_r26.10>`__
-branch of AMD-Ecosystem/quadrants.
+`https://github.com/AMD-Ecosystem/quadrants/tree/rocm10.1.0_r26.10 <https://github.com/AMD-Ecosystem/quadrants/tree/rocm10.1.0_r26.10>`__
+branch.
 
 The Quadrants public repository is located at
 `https://github.com/AMD-Ecosystem/quadrants <https://github.com/AMD-Ecosystem/quadrants>`__.
