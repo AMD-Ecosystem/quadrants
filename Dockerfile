@@ -82,10 +82,6 @@ RUN pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ \
     && pip install --group test \
     && rm -rf /src/quadrants/build /src/quadrants/dist
 
-# test_pyi_stubs runs Pyright. Plain pyright downloads Node through nodeenv,
-# and nodeenv 1.11.0 crashes on a prerelease version. This extra ships Node.
-RUN pip install --no-cache-dir "pyright[nodejs]"
-
 
 FROM ${ROCM_IMAGE}
 
