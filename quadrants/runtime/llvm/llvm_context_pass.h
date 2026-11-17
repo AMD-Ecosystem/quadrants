@@ -255,7 +255,15 @@ struct AMDGPUConvertFuncParamAddressSpacePass : public ModulePass {
       auto new_func_type = llvm::FunctionType::get(func_type->getReturnType(), new_func_params, false);
       auto new_func = llvm::Function::Create(new_func_type, f->getLinkage(), f->getAddressSpace());
       new_func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
-      new_func->addFnAttr("amdgpu-flat-work-group-size", "1, 1024");
+      // Keep the launch bounds codegen declared for the task (`mark_function_as_amdgpu_kernel`); default otherwise.
+      if (f->hasFnAttribute("amdgpu-flat-work-group-size")) {
+        new_func->addFnAttr(f->getFnAttribute("amdgpu-flat-work-group-size"));
+        if (f->hasFnAttribute("amdgpu-waves-per-eu")) {
+          new_func->addFnAttr(f->getFnAttribute("amdgpu-waves-per-eu"));
+        }
+      } else {
+        new_func->addFnAttr("amdgpu-flat-work-group-size", "1, 1024");
+      }
       new_func->addFnAttr("target-cpu", "gfx" + AMDGPUContext::get_instance().get_mcpu().substr(3, 4));
       new_func->setComdat(f->getComdat());
       f->getParent()->getFunctionList().insert(f->getIterator(), new_func);
