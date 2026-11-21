@@ -878,8 +878,18 @@ void QuadrantsLLVMContext::mark_function_as_cuda_kernel(llvm::Function *func, in
   }
 }
 
-void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(llvm::Function *func) {
+void QuadrantsLLVMContext::mark_function_as_amdgpu_kernel(llvm::Function *func, int block_dim) {
   func->setCallingConv(llvm::CallingConv::AMDGPU_KERNEL);
+  if (block_dim > 0 && block_dim <= 1024) {
+    // AMDGPU launch bounds, the counterpart of `maxntidx` above. Every launch of an offloaded task uses exactly
+    // `task.block_dim` threads per workgroup, so declare it. Otherwise the backend has to assume a 1024-thread
+    // workgroup and caps the per-lane register budget for it (128 VGPRs on gfx9 / CDNA), which makes register-heavy
+    // kernels spill to scratch. With a small declared block alone, the backend may instead grow a kernel to the whole
+    // register file (512 VGPRs, one wave per SIMD), which hides no latency. Also ask for at least two waves per SIMD:
+    // on gfx9 / CDNA that is a 256-VGPR budget, between the two.
+    func->addFnAttr("amdgpu-flat-work-group-size", "1," + std::to_string(block_dim));
+    func->addFnAttr("amdgpu-waves-per-eu", "2");
+  }
 }
 
 void QuadrantsLLVMContext::eliminate_unused_functions(llvm::Module *module,
